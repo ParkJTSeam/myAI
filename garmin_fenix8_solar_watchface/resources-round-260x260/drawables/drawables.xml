@@ -1,0 +1,31 @@
+<drawables>
+  <bitmap id="Background" filename="background.png" dithering="none"/>
+  <bitmap id="Cap" filename="cap.png" dithering="none"/>
+  <bitmap id="Week0" filename="week0.png" dithering="none"/>
+  <bitmap id="Week1" filename="week1.png" dithering="none"/>
+  <bitmap id="Week2" filename="week2.png" dithering="none"/>
+  <bitmap id="Week3" filename="week3.png" dithering="none"/>
+  <bitmap id="Week4" filename="week4.png" dithering="none"/>
+  <bitmap id="Week5" filename="week5.png" dithering="none"/>
+  <bitmap id="Week6" filename="week6.png" dithering="none"/>
+  <bitmap id="T0" filename="t0.png" dithering="none"/>
+  <bitmap id="T1" filename="t1.png" dithering="none"/>
+  <bitmap id="T2" filename="t2.png" dithering="none"/>
+  <bitmap id="T3" filename="t3.png" dithering="none"/>
+  <bitmap id="T4" filename="t4.png" dithering="none"/>
+  <bitmap id="T5" filename="t5.png" dithering="none"/>
+  <bitmap id="T6" filename="t6.png" dithering="none"/>
+  <bitmap id="T7" filename="t7.png" dithering="none"/>
+  <bitmap id="T8" filename="t8.png" dithering="none"/>
+  <bitmap id="T9" filename="t9.png" dithering="none"/>
+  <bitmap id="D0" filename="d0.png" dithering="none"/>
+  <bitmap id="D1" filename="d1.png" dithering="none"/>
+  <bitmap id="D2" filename="d2.png" dithering="none"/>
+  <bitmap id="D3" filename="d3.png" dithering="none"/>
+  <bitmap id="D4" filename="d4.png" dithering="none"/>
+  <bitmap id="D5" filename="d5.png" dithering="none"/>
+  <bitmap id="D6" filename="d6.png" dithering="none"/>
+  <bitmap id="D7" filename="d7.png" dithering="none"/>
+  <bitmap id="D8" filename="d8.png" dithering="none"/>
+  <bitmap id="D9" filename="d9.png" dithering="none"/>
+</drawables>
