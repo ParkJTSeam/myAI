@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>오늘의 건강 대시보드</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --text: #1d2330; --muted: #6b7280; --line: #e5e7eb;
+    --sleep: #6366f1; --deep: #3730a3; --light: #818cf8; --rem: #c084fc; --awake: #f9a8d4;
+    --move: #10b981; --burn: #f97316; --eat: #0ea5e9; --bmr: #fdba74; --warn: #ef4444; --good: #16a34a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1117; --card: #181b24; --text: #e8eaf0; --muted: #9aa1b2; --line: #2a2f3c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  h1 { font-size: 20px; margin: 0; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .controls { display: flex; gap: 6px; align-items: center; }
+  button, input { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--text);
+    border-radius: 10px; padding: 7px 11px; }
+  button { cursor: pointer; white-space: nowrap; }
+  button.primary { background: var(--sleep); color: #fff; border-color: var(--sleep); }
+  button:disabled { opacity: .5; cursor: wait; }
+
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(3, 1fr); }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; display: flex; justify-content: space-between; align-items: baseline; }
+  .card h2 small { font-weight: 400; color: var(--muted); font-size: 12px; }
+
+  .hero { display: flex; align-items: center; gap: 14px; }
+  .ring { position: relative; width: 104px; height: 104px; flex: none; }
+  .ring svg { transform: rotate(-90deg); }
+  .ring .val { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .ring .val b { font-size: 24px; line-height: 1; }
+  .ring .val span { font-size: 10px; color: var(--muted); margin-top: 3px; text-align: center; line-height: 1.3; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-size: 13px; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; font-weight: 600; text-align: right; }
+
+  .bar { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: var(--line); margin: 14px 0 6px; }
+  .bar i { display: block; height: 100%; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); }
+  .legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; background: var(--c); }
+
+  .acts { list-style: none; padding: 0; margin: 12px 0 0; }
+  .acts li { display: flex; justify-content: space-between; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 13px; }
+  .acts li .t { color: var(--muted); font-size: 12px; }
+
+  .balance { font-size: 28px; font-weight: 700; margin: 4px 0; }
+  .cmp { margin-top: 10px; font-size: 13px; }
+  .cmp .row { display: grid; grid-template-columns: 52px 1fr 70px; align-items: center; gap: 8px; margin: 6px 0; }
+  .cmp .track { height: 14px; background: var(--line); border-radius: 7px; overflow: hidden; }
+  .cmp .track i { display: block; height: 100%; border-radius: 7px; }
+  .cmp .n { text-align: right; font-weight: 600; }
+  .intake { display: flex; gap: 6px; margin-top: 12px; }
+  .intake input { width: 100%; }
+
+  .mini { display: grid; gap: 14px; grid-template-columns: repeat(4, 1fr); margin-top: 14px; }
+  @media (max-width: 860px) { .mini { grid-template-columns: repeat(2, 1fr); } }
+  .mini .card { padding: 12px 14px; }
+  .mini .lbl { font-size: 12px; color: var(--muted); }
+  .mini .big { font-size: 22px; font-weight: 700; margin-top: 2px; }
+  .mini .big small { font-size: 12px; font-weight: 400; color: var(--muted); }
+
+  .trend { margin-top: 14px; }
+  .charts { display: grid; gap: 14px; grid-template-columns: repeat(3, 1fr); }
+  @media (max-width: 860px) { .charts { grid-template-columns: 1fr; } }
+  .chart h3 { font-size: 13px; margin: 0 0 6px; color: var(--muted); font-weight: 600; }
+  .chart svg text { fill: var(--muted); font-size: 10px; }
+
+  .empty { text-align: center; padding: 40px 10px; color: var(--muted); }
+  .toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); background: #111827; color: #fff;
+    padding: 9px 14px; border-radius: 10px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90vw; }
+  .toast.show { opacity: .95; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>⌚ 오늘의 건강 대시보드</h1>
+      <div class="sub" id="updated">불러오는 중…</div>
+    </div>
+    <div class="controls">
+      <button id="prev" title="전날">◀</button>
+      <input type="date" id="date">
+      <button id="next" title="다음날">▶</button>
+      <button id="sync" class="primary">🔄 가민 동기화</button>
+    </div>
+  </header>
+  <div id="app"><div class="empty">데이터를 불러오는 중입니다…</div></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+  const $ = s => document.querySelector(s);
+  const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+  const n = v => (v === '' || v == null || isNaN(+v) ? null : +v);
+  const f = (v, d = 0) => (n(v) == null ? '–' : (+v).toLocaleString('ko-KR', { maximumFractionDigits: d }));
+  const hm = min => (n(min) == null ? '–' : Math.floor(min / 60) + '시간 ' + Math.round(min % 60) + '분');
+  const pad = x => String(x).padStart(2, '0');
+  const today = () => { const d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+  const shift = (s, k) => { const d = new Date(s + 'T12:00:00'); d.setDate(d.getDate() + k);
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+  const WEEK = ['일', '월', '화', '수', '목', '금', '토'];
+  const TYPE_KO = { running: '🏃 러닝', treadmill_running: '🏃 트레드밀', trail_running: '⛰ 트레일러닝', cycling: '🚴 사이클',
+    indoor_cycling: '🚴 실내사이클', road_biking: '🚴 로드', walking: '🚶 걷기', hiking: '🥾 하이킹',
+    strength_training: '🏋 근력', lap_swimming: '🏊 수영', open_water_swimming: '🏊 오픈워터', yoga: '🧘 요가',
+    pilates: '🧘 필라테스', cardio: '❤️ 유산소', hiit: '🔥 HIIT', elliptical: '⚙ 일립티컬', other: '✨ 기타' };
+
+  function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+    clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 3500); }
+
+  function ring(pct, color, big, small) {
+    const r = 44, c = 2 * Math.PI * r, p = Math.max(0, Math.min(1, pct || 0));
+    return `<div class="ring"><svg width="104" height="104" viewBox="0 0 104 104">
+      <circle cx="52" cy="52" r="${r}" fill="none" stroke="${css('--line')}" stroke-width="10"/>
+      <circle cx="52" cy="52" r="${r}" fill="none" stroke="${color}" stroke-width="10" stroke-linecap="round"
+        stroke-dasharray="${c * p} ${c}"/></svg>
+      <div class="val"><b>${big}</b><span>${small}</span></div></div>`;
+  }
+
+  function stackBar(parts) {
+    const total = parts.reduce((s, p) => s + (n(p.v) || 0), 0) || 1;
+    return `<div class="bar">${parts.map(p => `<i style="width:${(n(p.v) || 0) / total * 100}%;background:${p.c}" title="${p.l}"></i>`).join('')}</div>
+      <div class="legend">${parts.map(p => `<span style="--c:${p.c}">${p.l} ${p.fmt || f(p.v)}</span>`).join('')}</div>`;
+  }
+
+  function sleepGrade(score) {
+    if (score == null) return '';
+    return score >= 90 ? '최고 😴' : score >= 80 ? '좋음 🙂' : score >= 60 ? '보통 😐' : '부족 😵';
+  }
+
+  function barChart(trend, key, color, opts = {}) {
+    const W = 300, H = 120, P = 18, bw = (W - P) / trend.length;
+    const vals = trend.map(t => opts.fn ? opts.fn(t) : n(t[key]));
+    const max = Math.max(opts.goal || 0, ...vals.map(v => Math.abs(v || 0))) || 1;
+    const zeroY = opts.signed ? (H - P) / 2 : H - P;
+    const scale = opts.signed ? zeroY - 4 : H - P - 6;
+    let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="none">`;
+    if (opts.goal) { const gy = zeroY - opts.goal / max * scale;
+      s += `<line x1="0" x2="${W}" y1="${gy}" y2="${gy}" stroke="${color}" stroke-dasharray="4 4" opacity=".6"/>`; }
+    if (opts.signed) s += `<line x1="0" x2="${W}" y1="${zeroY}" y2="${zeroY}" stroke="${css('--line')}"/>`;
+    vals.forEach((v, i) => {
+      const x = P / 2 + i * bw + bw * 0.18, w = bw * 0.64;
+      if (v != null) {
+        const h = Math.abs(v) / max * scale, y = v >= 0 ? zeroY - h : zeroY;
+        const c = opts.signed ? (v > 0 ? css('--warn') : css('--good')) : color;
+        s += `<rect x="${x}" y="${y}" width="${w}" height="${Math.max(h, 1)}" rx="3" fill="${c}" opacity="${i === vals.length - 1 ? 1 : .55}"><title>${trend[i].date}: ${f(v, 1)}</title></rect>`;
+      }
+      const d = new Date(trend[i].date + 'T12:00:00');
+      s += `<text x="${x + w / 2}" y="${H - 4}" text-anchor="middle">${WEEK[d.getDay()]}</text>`;
+    });
+    return s + '</svg>';
+  }
+
+  function render(data) {
+    const d = data.day, g = data.goals;
+    $('#date').value = data.date;
+    $('#updated').textContent = d && d.updatedAt ? '마지막 갱신 ' + d.updatedAt
+      : (data.hasApiKey ? '이 날짜의 데이터가 없습니다. 🔄 동기화를 눌러보세요.' : 'APIKEY 미등록 – 시트 메뉴에서 등록하거나 샘플 데이터를 넣어보세요.');
+    if (!d) { $('#app').innerHTML = `<div class="card empty">📭 ${data.date} 데이터가 없습니다.</div>` + trendHtml(data); drawTrend(data); return; }
+
+    // ── 수면
+    const score = n(d.sleepScore), sleepMin = n(d.sleepHours) != null ? d.sleepHours * 60 : null;
+    const sleepCard = `<div class="card"><h2>😴 수면 <small>${d.bedTime || '–'} → ${d.wakeTime || '–'}</small></h2>
+      <div class="hero">${ring(score != null ? score / 100 : (sleepMin || 0) / (g.sleepHours * 60), css('--sleep'),
+          score != null ? score : f(d.sleepHours, 1), score != null ? '수면점수<br>' + sleepGrade(score) : '시간')}
+        <dl class="kv"><dt>총 수면</dt><dd>${hm(sleepMin)}</dd>
+          <dt>목표 대비</dt><dd>${sleepMin != null ? Math.round(sleepMin / (g.sleepHours * 60) * 100) + '%' : '–'}</dd>
+          <dt>안정시 심박</dt><dd>${f(d.restingHR)} bpm</dd></dl></div>
+      ${stackBar([{ l: '깊은', v: d.deepMin, c: css('--deep'), fmt: hm(d.deepMin) },
+                  { l: '얕은', v: d.lightMin, c: css('--light'), fmt: hm(d.lightMin) },
+                  { l: 'REM', v: d.remMin, c: css('--rem'), fmt: hm(d.remMin) },
+                  { l: '깸', v: d.awakeMin, c: css('--awake'), fmt: f(d.awakeMin) + '분' }])}</div>`;
+
+    // ── 운동
+    const steps = n(d.steps), goal = n(d.stepGoal) || 8000;
+    const acts = data.activities;
+    const actCard = `<div class="card"><h2>🏃 운동 · 활동 <small>강도활동 ${f(d.intensityMin)}/${g.activeMin}분</small></h2>
+      <div class="hero">${ring((steps || 0) / goal, css('--move'), f(steps), '걸음<br>목표 ' + f(goal))}
+        <dl class="kv"><dt>이동 거리</dt><dd>${f(d.distanceKm, 2)} km</dd>
+          <dt>오른 층수</dt><dd>${f(d.floors)} 층</dd>
+          <dt>운동</dt><dd>${f(d.workoutCount)}회 · ${f(d.workoutMin)}분</dd></dl></div>
+      <ul class="acts">${acts.length ? acts.map(a => `<li><div>${TYPE_KO[a.type] || '✨ ' + (a.type || '활동')}
+          <div class="t">${a.startTime || ''} · ${a.name || ''}</div></div>
+          <div style="text-align:right">${f(a.durationMin)}분${n(a.distanceKm) ? ' · ' + f(a.distanceKm, 2) + 'km' : ''}
+          <div class="t">${f(a.kcal)} kcal${n(a.avgHR) ? ' · ♥ ' + a.avgHR : ''}</div></div></li>`).join('')
+        : '<li class="t">기록된 운동이 없습니다.</li>'}</ul></div>`;
+
+    // ── 칼로리
+    const burn = n(d.totalKcal), eat = n(d.intakeKcal);
+    const bal = burn != null && eat != null ? eat - burn : null;
+    const maxK = Math.max(burn || 0, eat || 0, g.intakeKcal) || 1;
+    const kcalCard = `<div class="card"><h2>🔥 칼로리 <small>섭취 − 소모</small></h2>
+      <div class="balance" style="color:${bal == null ? 'inherit' : bal > 0 ? css('--warn') : css('--good')}">
+        ${bal == null ? '–' : (bal > 0 ? '+' : '') + f(bal)} <small style="font-size:14px">kcal</small></div>
+      <div class="sub">${bal == null ? '섭취 칼로리를 입력하면 수지가 계산됩니다.' : bal > 0 ? '소모보다 더 먹었어요 (잉여)' : '소모가 더 많아요 (결손)'}</div>
+      <div class="cmp">
+        <div class="row"><span>섭취</span><div class="track"><i style="width:${(eat || 0) / maxK * 100}%;background:${css('--eat')}"></i></div><span class="n">${f(eat)}</span></div>
+        <div class="row"><span>소모</span><div class="track"><i style="width:${(burn || 0) / maxK * 100}%;background:${css('--burn')}"></i></div><span class="n">${f(burn)}</span></div>
+      </div>
+      ${stackBar([{ l: '기초대사', v: d.bmrKcal, c: css('--bmr') }, { l: '활동', v: d.activeKcal, c: css('--burn') }])}
+      <div class="intake"><input type="number" id="intakeInput" inputmode="numeric" placeholder="섭취 칼로리 직접 입력 (kcal)"
+        value="${n(d.manualIntakeKcal) != null ? d.manualIntakeKcal : ''}"><button id="saveIntake">저장</button></div>
+      <div class="sub" style="margin-top:6px">${n(d.garminIntakeKcal) != null ? '가민(MyFitnessPal 연동) 기록: ' + f(d.garminIntakeKcal) + ' kcal' : '목표 섭취 ' + f(g.intakeKcal) + ' kcal'}</div></div>`;
+
+    // ── 컨디션
+    const mini = `<div class="mini">
+      <div class="card"><div class="lbl">🔋 바디 배터리</div><div class="big">${f(d.bbHigh)} <small>→ ${f(d.bbLow)}</small></div></div>
+      <div class="card"><div class="lbl">😮‍💨 평균 스트레스</div><div class="big">${f(d.avgStress)} <small>/ 100</small></div></div>
+      <div class="card"><div class="lbl">❤️ 안정시 심박</div><div class="big">${f(d.restingHR)} <small>bpm</small></div></div>
+      <div class="card"><div class="lbl">⚡ 운동 소모</div><div class="big">${f(d.workoutKcal)} <small>kcal</small></div></div></div>`;
+
+    $('#app').innerHTML = `<div class="grid">${sleepCard}${actCard}${kcalCard}</div>${mini}${trendHtml(data)}`;
+    drawTrend(data);
+    $('#saveIntake').onclick = () => {
+      const v = $('#intakeInput').value;
+      busy(true);
+      google.script.run.withSuccessHandler(r => { busy(false); render(r); toast('섭취 칼로리 저장 완료'); })
+        .withFailureHandler(fail).saveIntake(data.date, v);
+    };
+  }
+
+  function trendHtml() {
+    return `<div class="card trend"><h2>📈 최근 7일 <small>점선 = 목표 · 진한 막대 = 선택한 날</small></h2><div class="charts">
+      <div class="chart"><h3>수면 시간 (h)</h3><div id="c1"></div></div>
+      <div class="chart"><h3>걸음 수</h3><div id="c2"></div></div>
+      <div class="chart"><h3>칼로리 수지 (섭취−소모) · 빨강=잉여 초록=결손</h3><div id="c3"></div></div></div></div>`;
+  }
+  function drawTrend(data) {
+    const t = data.trend;
+    $('#c1').innerHTML = barChart(t, 'sleepHours', css('--sleep'), { goal: data.goals.sleepHours });
+    $('#c2').innerHTML = barChart(t, 'steps', css('--move'), { goal: n(data.day && data.day.stepGoal) || 8000 });
+    $('#c3').innerHTML = barChart(t, null, css('--burn'), { signed: true,
+      fn: x => (n(x.intakeKcal) != null && n(x.totalKcal) != null ? x.intakeKcal - x.totalKcal : null) });
+  }
+
+  function busy(b) { ['#sync', '#prev', '#next', '#date'].forEach(s => ($(s).disabled = b)); }
+  function fail(e) { busy(false); toast('⚠️ ' + (e && e.message ? e.message : e)); }
+  function load(date) {
+    busy(true);
+    google.script.run.withSuccessHandler(r => { busy(false); render(r); }).withFailureHandler(fail).getDashboardData(date);
+  }
+
+  $('#date').value = today();
+  $('#date').onchange = e => load(e.target.value);
+  $('#prev').onclick = () => load(shift($('#date').value, -1));
+  $('#next').onclick = () => load(shift($('#date').value, 1));
+  $('#sync').onclick = () => {
+    busy(true); toast('가민에서 데이터를 가져오는 중…');
+    google.script.run.withSuccessHandler(r => { busy(false); render(r); toast('✅ 동기화 완료'); })
+      .withFailureHandler(fail).syncDate($('#date').value);
+  };
+  load(today());
+</script>
+</body>
+</html>
