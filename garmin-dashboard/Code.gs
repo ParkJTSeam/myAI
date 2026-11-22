@@ -16,6 +16,8 @@
 const CONFIG = {
   SHEET_DAILY: '일일요약',
   SHEET_ACT: '활동기록',
+  SHEET_STR: '근력세트',
+  STRENGTH_HISTORY: 10,      // 종목별로 보여줄 최근 운동 횟수
   GOAL_SLEEP_HOURS: 7.5,     // 목표 수면시간
   GOAL_INTAKE_KCAL: 2200,    // 목표 섭취 칼로리
   GOAL_ACTIVE_MIN: 30,       // 하루 목표 강도 활동(분)
@@ -66,7 +68,39 @@ const ACT_COLS = [
   ['maxHR', '최대심박'],
 ];
 
-const TEXT_KEYS = ['date', 'activityId', 'bedTime', 'wakeTime', 'startTime', 'updatedAt'];
+const STR_COLS = [
+  ['key', '세트키'],          // 활동ID-순번 (중복 방지용)
+  ['activityId', '활동ID'],
+  ['date', '날짜'],
+  ['exercise', '종목코드'],
+  ['exerciseKo', '종목'],
+  ['setNo', '세트'],
+  ['weightKg', '무게(kg)'],
+  ['reps', '횟수'],
+  ['volumeKg', '볼륨(kg)'],
+];
+// 가민 근력 활동으로 보고 세트 정보를 조회할 활동 종류
+const STRENGTH_TYPES = ['strength_training', 'hiit', 'indoor_cardio', 'fitness_equipment'];
+
+// 가민 종목코드 → 한글 (없는 종목은 영문을 보기 좋게 변환)
+const EXERCISE_KO = {
+  BENCH_PRESS: '벤치프레스', BARBELL_BENCH_PRESS: '바벨 벤치프레스', DUMBBELL_BENCH_PRESS: '덤벨 벤치프레스',
+  INCLINE_BARBELL_BENCH_PRESS: '인클라인 벤치프레스', INCLINE_DUMBBELL_BENCH_PRESS: '인클라인 덤벨프레스',
+  SQUAT: '스쿼트', BARBELL_BACK_SQUAT: '바벨 백스쿼트', BACK_SQUAT: '백스쿼트', FRONT_SQUAT: '프론트 스쿼트',
+  GOBLET_SQUAT: '고블릿 스쿼트', LEG_PRESS: '레그프레스',
+  DEADLIFT: '데드리프트', BARBELL_DEADLIFT: '바벨 데드리프트', ROMANIAN_DEADLIFT: '루마니안 데드리프트',
+  SHOULDER_PRESS: '숄더프레스', OVERHEAD_PRESS: '오버헤드프레스', BARBELL_SHOULDER_PRESS: '바벨 숄더프레스',
+  DUMBBELL_SHOULDER_PRESS: '덤벨 숄더프레스', LATERAL_RAISE: '레터럴 레이즈',
+  ROW: '로우', BARBELL_ROW: '바벨 로우', BENT_OVER_ROW: '벤트오버 로우', DUMBBELL_ROW: '덤벨 로우', SEATED_CABLE_ROW: '시티드 케이블 로우',
+  PULL_UP: '풀업', CHIN_UP: '친업', LAT_PULLDOWN: '랫풀다운', PULL_DOWN: '풀다운',
+  PUSH_UP: '푸시업', DIP: '딥스', TRICEPS_DIP: '딥스', TRICEPS_EXTENSION: '트라이셉스 익스텐션',
+  CURL: '컬', BARBELL_BICEPS_CURL: '바벨 컬', DUMBBELL_BICEPS_CURL: '덤벨 컬', HAMMER_CURL: '해머 컬',
+  LUNGE: '런지', LEG_CURL: '레그컬', LEG_EXTENSION: '레그 익스텐션', CALF_RAISE: '카프레이즈',
+  HIP_RAISE: '힙 레이즈', HIP_THRUST: '힙 쓰러스트', PLANK: '플랭크', CRUNCH: '크런치', SIT_UP: '싯업',
+  FLYE: '플라이', CHEST_FLY: '체스트 플라이', SHRUG: '슈러그', CORE: '코어', UNKNOWN: '미분류 종목',
+};
+
+const TEXT_KEYS = ['date', 'activityId', 'key', 'bedTime', 'wakeTime', 'startTime', 'updatedAt'];
 
 const GC_API = 'https://connectapi.garmin.com';
 const GC_UA = 'GCM-iOS-5.7.2.1';
@@ -93,13 +127,26 @@ function promptApiKey() {
   const res = ui.prompt('APIKEY 등록',
     'get_garmin_apikey.py 가 출력한 JSON 한 줄을 붙여넣으세요.', ui.ButtonSet.OK_CANCEL);
   if (res.getSelectedButton() !== ui.Button.OK) return;
-  const v = res.getResponseText().trim();
+  const name = saveApiKey(res.getResponseText());
+  ui.alert('✅ APIKEY 저장 및 연결 성공!\n사용자: ' + name);
+}
+
+/** APIKEY 저장 + 연결 확인 (시트 메뉴와 웹 대시보드 양쪽에서 사용). 성공 시 가민 사용자명 반환 */
+function saveApiKey(raw) {
+  const v = String(raw || '').trim();
   parseApiKey_(v); // 형식 검증
   const props = PropertiesService.getScriptProperties();
+  const old = props.getProperty('APIKEY');
   props.setProperty('APIKEY', v);
   props.deleteProperty('GC_OAUTH2');
   props.deleteProperty('GC_DISPLAY_NAME');
-  ui.alert('✅ APIKEY 저장 완료. "🩺 연결 테스트"를 눌러 확인하세요.');
+  try {
+    return getDisplayName_();
+  } catch (e) {
+    if (old) props.setProperty('APIKEY', old); else props.deleteProperty('APIKEY'); // 실패하면 이전 값 복원
+    props.deleteProperty('GC_OAUTH2');
+    throw e;
+  }
 }
 
 function testConnection() {
@@ -185,6 +232,18 @@ function syncDate(dateStr) {
 
   upsertDaily_(row);
   upsertActivities_(activities);
+
+  // 근력 운동이면 세트(무게·횟수) 상세까지 가져오기
+  acts.forEach(a => {
+    const type = (a.activityType && a.activityType.typeKey) || '';
+    if (STRENGTH_TYPES.indexOf(type) < 0) return;
+    try {
+      const res = gcGet_('/activity-service/activity/' + a.activityId + '/exerciseSets');
+      upsertStrengthSets_(parseExerciseSets_(String(a.activityId), dateStr, res));
+    } catch (e) {
+      console.warn('세트 정보 조회 실패 ' + a.activityId + ': ' + e.message);
+    }
+  });
   return getDashboardData(dateStr);
 }
 
@@ -248,6 +307,7 @@ function getDashboardData(dateStr) {
       intakeKcal: CONFIG.GOAL_INTAKE_KCAL,
       activeMin: CONFIG.GOAL_ACTIVE_MIN,
     },
+    strength: getStrengthData_(dateStr),
     hasApiKey: !!PropertiesService.getScriptProperties().getProperty('APIKEY'),
   };
 }
@@ -433,6 +493,91 @@ function upsertActivities_(acts) {
   sortByDate_(sh, ACT_COLS.length, [{ column: 2, ascending: true }, { column: 3, ascending: true }]);
 }
 
+// ═════════════════════════ 근력 운동 세트 ═════════════════════════
+/** 가민 exerciseSets 응답 → 시트 행 목록 (휴식 세트 제외, 종목별 세트 번호 부여) */
+function parseExerciseSets_(activityId, dateStr, res) {
+  const sets = (res && res.exerciseSets) || [];
+  const perEx = {};
+  const rows = [];
+  sets.filter(st => st.setType === 'ACTIVE').forEach((st, i) => {
+    const ex = (st.exercises || []).slice().sort((a, b) => (b.probability || 0) - (a.probability || 0))[0] || {};
+    const code = ex.name || ex.category || 'UNKNOWN';
+    perEx[code] = (perEx[code] || 0) + 1;
+    const w = st.weight != null && st.weight > 0 ? round_(st.weight / 1000, 1) : ''; // 가민 무게 단위: g
+    const reps = st.repetitionCount != null ? st.repetitionCount : '';
+    rows.push({
+      key: activityId + '-' + (i + 1), activityId: activityId, date: dateStr,
+      exercise: code, exerciseKo: exerciseKo_(code), setNo: perEx[code],
+      weightKg: w, reps: reps, volumeKg: w !== '' && reps !== '' ? round_(w * reps, 1) : '',
+    });
+  });
+  return rows;
+}
+
+/** 세트 저장. 가민 값이 비어 있으면 시트에 직접 고쳐 적은 무게/횟수를 보존 */
+function upsertStrengthSets_(rows) {
+  if (!rows.length) return;
+  const sh = getSheet_(CONFIG.SHEET_STR, STR_COLS);
+  const existing = readSheet_(CONFIG.SHEET_STR, STR_COLS);
+  const pos = {};
+  existing.forEach((r, i) => (pos[String(r.key)] = { row: i + 2, data: r }));
+  rows.forEach(r => {
+    const old = pos[r.key];
+    if (old) {
+      ['weightKg', 'reps', 'exercise', 'exerciseKo'].forEach(k => {
+        if ((r[k] === '' || r[k] === 'UNKNOWN' || r[k] === EXERCISE_KO.UNKNOWN) && old.data[k] !== '') r[k] = old.data[k];
+      });
+      const w = num_(r.weightKg), n = num_(r.reps);
+      r.volumeKg = w != null && n != null ? round_(w * n, 1) : '';
+    }
+    const vals = [STR_COLS.map(c => (r[c[0]] == null ? '' : r[c[0]]))];
+    if (old) sh.getRange(old.row, 1, 1, STR_COLS.length).setValues(vals);
+    else sh.appendRow(vals[0]);
+  });
+  sortByDate_(sh, STR_COLS.length, [{ column: 3, ascending: true }, { column: 2, ascending: true }, { column: 4, ascending: true }, { column: 6, ascending: true }]);
+}
+
+/**
+ * 종목별 운동 이력 (선택한 날짜까지). 각 세션 = 한 날짜에 한 종목을 한 기록
+ * { todayExercises: [code...], exercises: { code: { label, sessions: [{date, sets:[{w,r}], topWeight, setCount, totalReps, volume}] } } }
+ */
+function getStrengthData_(dateStr) {
+  const rows = readSheet_(CONFIG.SHEET_STR, STR_COLS).filter(r => r.date && r.date <= dateStr);
+  const ex = {};
+  rows.forEach(r => {
+    const code = r.exercise || 'UNKNOWN';
+    const e = ex[code] || (ex[code] = { label: r.exerciseKo || exerciseKo_(code), byDate: {} });
+    const s = e.byDate[r.date] || (e.byDate[r.date] = { date: r.date, sets: [] });
+    s.sets.push({ w: num_(r.weightKg), r: num_(r.reps), no: num_(r.setNo) || s.sets.length + 1 });
+  });
+  const out = {};
+  Object.keys(ex).forEach(code => {
+    const sessions = Object.keys(ex[code].byDate).sort().reverse().slice(0, CONFIG.STRENGTH_HISTORY).map(d => {
+      const s = ex[code].byDate[d];
+      s.sets.sort((a, b) => a.no - b.no);
+      const ws = s.sets.map(x => x.w).filter(x => x != null);
+      return {
+        date: d,
+        sets: s.sets.map(x => ({ w: x.w, r: x.r })),
+        topWeight: ws.length ? Math.max.apply(null, ws) : null,
+        setCount: s.sets.length,
+        totalReps: s.sets.reduce((t, x) => t + (x.r || 0), 0),
+        volume: round_(s.sets.reduce((t, x) => t + (x.w || 0) * (x.r || 0), 0), 1),
+      };
+    });
+    out[code] = { label: ex[code].label, lastDate: sessions[0].date, sessions: sessions };
+  });
+  return {
+    todayExercises: Object.keys(out).filter(c => out[c].lastDate === dateStr),
+    exercises: out,
+  };
+}
+
+function exerciseKo_(code) {
+  if (EXERCISE_KO[code]) return EXERCISE_KO[code];
+  return String(code).toLowerCase().split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
 function sortByDate_(sh, ncols, spec) {
   if (sh.getLastRow() > 2) sh.getRange(2, 1, sh.getLastRow() - 1, ncols).sort(spec || { column: 1, ascending: true });
 }
@@ -440,13 +585,31 @@ function sortByDate_(sh, ncols, spec) {
 // ═════════════════════════ 샘플 데이터 ═════════════════════════
 function seedDemoData() {
   const now = new Date();
-  const types = [['running', '아침 러닝'], ['cycling', '퇴근길 라이딩'], ['strength_training', '근력 운동'], ['walking', '산책']];
+  const types = [['running', '아침 러닝'], ['cycling', '퇴근길 라이딩'], ['walking', '산책'], ['hiking', '등산']];
   for (let i = 13; i >= 0; i--) {
     const d = fmt_(new Date(now.getTime() - i * 86400000));
     const r = (a, b) => Math.round(a + Math.random() * (b - a));
     const deep = r(50, 110), light = r(180, 260), rem = r(70, 120), awake = r(5, 30);
     const acts = [];
-    if (Math.random() < 0.7) {
+    if (i % 2 === 0) {
+      // 이틀에 한 번 근력 운동 (점진적으로 무게 증가하는 샘플)
+      const id = 'demo-str-' + d, step = (13 - i) / 2;
+      const plan = [['BARBELL_BENCH_PRESS', 50 + step * 2.5, 8], ['BARBELL_BACK_SQUAT', 70 + step * 2.5, 6],
+        [i % 4 === 0 ? 'LAT_PULLDOWN' : 'DUMBBELL_SHOULDER_PRESS', 15 + step, 10]];
+      const sets = [];
+      plan.forEach(p => {
+        const n = r(3, 5);
+        for (let k = 1; k <= n; k++) {
+          const w = Math.max(0, Math.round((p[1] + (k === n ? -5 : 0) + (Math.random() < 0.25 ? -2.5 : 0)) / 2.5) * 2.5);
+          const reps = p[2] + r(-2, 2);
+          sets.push({ key: id + '-' + (sets.length + 1), activityId: id, date: d, exercise: p[0], exerciseKo: exerciseKo_(p[0]),
+            setNo: k, weightKg: w, reps: reps, volumeKg: round_(w * reps, 1) });
+        }
+      });
+      upsertStrengthSets_(sets);
+      acts.push({ activityId: id, date: d, startTime: '19:' + r(10, 59), name: '헬스 - 상하체', type: 'strength_training',
+        durationMin: r(50, 75), distanceKm: '', kcal: r(250, 380), avgHR: r(105, 125), maxHR: r(145, 165) });
+    } else if (Math.random() < 0.6) {
       const t = types[r(0, types.length - 1)];
       const dur = r(25, 70);
       acts.push({ activityId: 'demo-' + d, date: d, startTime: '0' + r(6, 8) + ':' + r(10, 59), name: t[1], type: t[0],
