@@ -41,7 +41,10 @@
       <section id="scr-user" class="screen">
         <header class="topbar">
           <div class="who"><span class="mini-logo" data-sprite="dumbbell"></span><b id="u-name"></b></div>
-          <button class="btn btn-s btn-dark" data-action="logout">나가기</button>
+          <div class="top-actions">
+            <button class="btn btn-s btn-yellow" data-action="goto-coupon" title="보유 쿠폰">🎟 <b id="hdr-cp">0</b></button>
+            <button class="btn btn-s btn-dark" data-action="logout">나가기</button>
+          </div>
         </header>
 
         <div class="content">
@@ -68,13 +71,18 @@
 
           <!-- 쿠폰 탭 -->
           <div class="pane" id="pane-coupon">
-            <div class="px-box progress-box">
-              <div class="row-between"><b>다음 쿠폰까지</b><span id="cp-left"></span></div>
-              <div class="slots" id="cp-slots"></div>
-              <p class="hint">관리자 승인 도장 <b id="cp-every">5</b>개마다 쿠폰 1장이 자동 발급돼요.</p>
+            <div class="sub-tabs">
+              <button class="stab active" data-cp-tab="have">🎟 보유 쿠폰 <b id="cp-have-n">0</b></button>
+              <button class="stab" data-cp-tab="shop">⭐ 도장 교환</button>
+              <button class="stab" data-cp-tab="used">사용 완료</button>
             </div>
-            <h3 class="sec-title">🎟 내 쿠폰함</h3>
-            <div id="cp-list" class="coupon-list"></div>
+            <div class="cp-sec" id="cp-have"></div>
+            <div class="cp-sec hidden" id="cp-shop">
+              <div class="px-box wallet" id="cp-wallet"></div>
+              <div id="cp-rewards"></div>
+              <p class="hint">※ 도장은 <b>달마다 따로</b> 모아요. 교환하면 쓴 만큼 사라지고 남은 도장부터 다시 모여요.<br>예) 14개 모아서 식사권 교환 → 이번 달 도장 0개부터 다시 시작</p>
+            </div>
+            <div class="cp-sec hidden" id="cp-used"></div>
           </div>
 
           <!-- 게임 탭 -->
@@ -102,7 +110,7 @@
 
         <nav class="bottom-nav">
           <button class="nav-btn active" data-pane="pane-cal"><span data-sprite="calendar"></span>달력</button>
-          <button class="nav-btn" data-pane="pane-coupon"><span data-sprite="ticket"></span>쿠폰함</button>
+          <button class="nav-btn" data-pane="pane-coupon"><span data-sprite="ticket"></span>쿠폰함<i class="nav-badge hidden" id="nav-cp"></i></button>
           <button class="nav-btn" data-pane="pane-game"><span data-sprite="melon"></span>미니게임</button>
         </nav>
       </section>

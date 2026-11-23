@@ -200,22 +200,97 @@
   }
 
   function renderCoupons() {
-    var d = S.data, n = d.couponEvery, have = d.totalApproved % n;
-    $('cp-every').textContent = n;
-    $('cp-left').textContent = (n - have) + '개 남음';
-    var slots = '';
-    for (var i = 0; i < n; i++) slots += '<div class="slot">' + (i < have ? Sprites.get('stamp-pass') : (i + 1)) + '</div>';
-    $('cp-slots').style.gridTemplateColumns = 'repeat(' + Math.min(n, 5) + ', 1fr)';
-    $('cp-slots').innerHTML = slots;
-    $('cp-list').innerHTML = d.coupons.length ? d.coupons.map(couponHTML).join('') : '<div class="empty">아직 받은 쿠폰이 없어요.<br>도장을 모아보세요!</div>';
+    var d = S.data;
+    var have = d.coupons.filter(function (c) { return !c.used; });
+    var used = d.coupons.filter(function (c) { return c.used; });
+    $('hdr-cp').textContent = have.length;
+    $('cp-have-n').textContent = have.length;
+    $('nav-cp').textContent = have.length;
+    $('nav-cp').classList.toggle('hidden', !have.length);
+    $('cp-have').innerHTML = have.length ? have.map(function (c) { return couponHTML(c); }).join('') +
+      '<p class="hint">쿠폰 코드를 관리자에게 보여주면 사용 처리돼요.</p>'
+      : '<div class="empty">보유 중인 쿠폰이 없어요.<br>도장을 모아 [도장 교환]에서 바꿔보세요!</div>';
+    $('cp-used').innerHTML = used.length ? used.map(function (c) { return couponHTML(c); }).join('') : '<div class="empty">사용한 쿠폰이 없어요.</div>';
+
+    var ws = d.wallets;
+    if (!S.walletYm || !ws.some(function (w) { return w.ym === S.walletYm; })) S.walletYm = ws[0].ym;
+    var w = ws.filter(function (x) { return x.ym === S.walletYm; })[0];
+    var stampRewards = d.rewards.filter(function (r) { return !r.perfect; });
+    var maxCost = stampRewards.reduce(function (m, r) { return Math.max(m, r.cost); }, 7);
+    var rowsN = Math.ceil(maxCost / 7), board = '';
+    for (var i = 0; i < rowsN * 7; i++) {
+      board += '<div class="slot">' + (i < w.balance ? Sprites.get('stamp-pass') : (i + 1)) + '</div>';
+      if (i % 7 === 6) {
+        var g = stampRewards.filter(function (r) { return r.cost === i + 1; })[0];
+        board += '<div class="goal' + (g && w.balance >= g.cost ? ' on' : '') + '">' + (g ? '<span>' + Sprites.get(g.icon) + '</span>' : '') + '</div>';
+      }
+    }
+    $('cp-wallet').innerHTML =
+      (ws.length > 1 ? '<div class="w-month">' + ws.map(function (x) {
+        return '<button class="btn btn-s ' + (x.ym === S.walletYm ? 'btn-blue' : 'btn-dark') + '" data-action="wallet-month" data-ym="' + x.ym + '">' + (+x.ym.slice(5)) + '월 도장</button>';
+      }).join('') + '</div>' : '') +
+      '<div class="w-big"><span>' + (+w.ym.slice(5)) + '월 보유 도장</span><b>' + w.balance + '개</b></div>' +
+      '<div class="w-sub">승인 도장 ' + w.approved + '개 · 교환에 사용 ' + w.used + '개 · 출석 ' + w.approved + '/' + w.days + '일</div>' +
+      '<div class="board">' + board + '</div>';
+
+    $('cp-rewards').innerHTML = d.rewards.map(function (r) {
+      var ok, prog, info, label = '교환';
+      if (r.perfect) {
+        var claimed = w.claimed.indexOf(r.id) >= 0;
+        ok = w.perfect && !claimed; prog = Math.min(1, w.approved / w.days);
+        info = '만근 ' + w.approved + '/' + w.days + '일' + (claimed ? ' · 수령 완료' : '');
+        if (claimed) label = '받음';
+      } else {
+        ok = w.balance >= r.cost; prog = Math.min(1, w.balance / r.cost);
+        info = '도장 ' + r.cost + '개 사용' + (ok ? '' : ' · ' + (r.cost - w.balance) + '개 부족');
+      }
+      return '<div class="reward px-box' + (ok ? ' ok' : '') + '">' +
+        '<div class="rw-ico">' + Sprites.get(r.icon) + '</div>' +
+        '<div class="rw-body"><div class="rw-name">' + esc(r.name) + '</div><div class="rw-desc">' + esc(r.desc) + '</div>' +
+        '<div class="rw-desc">' + info + '</div><div class="rw-bar"><i style="width:' + Math.round(prog * 100) + '%"></i></div></div>' +
+        '<button class="btn btn-s ' + (ok ? 'btn-green' : 'btn-dark') + '" data-action="exchange" data-id="' + esc(r.id) + '"' + (ok ? '' : ' disabled') + '>' + label + '</button></div>';
+    }).join('');
+  }
+
+  function cpTab(t) {
+    document.querySelectorAll('[data-cp-tab]').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-cp-tab') === t); });
+    ['have', 'shop', 'used'].forEach(function (k) { $('cp-' + k).classList.toggle('hidden', k !== t); });
+  }
+
+  function askExchange(id) {
+    var r = S.data.rewards.filter(function (x) { return x.id === id; })[0];
+    var w = S.data.wallets.filter(function (x) { return x.ym === S.walletYm; })[0];
+    if (!r || !w) return;
+    openModal('<h3>도장 교환</h3><div class="center"><div class="big-stamp" style="transform:none;width:30%">' + Sprites.get(r.icon) + '</div>' +
+      '<p><b>' + esc(r.name) + '</b><br><small>' + esc(r.desc) + '</small></p>' +
+      (r.perfect ? '<p class="hint">' + (+w.ym.slice(5)) + '월 만근 보상이에요. 도장은 줄어들지 않아요.</p>'
+        : '<p>' + (+w.ym.slice(5)) + '월 도장 <b>' + w.balance + '개 → ' + (w.balance - r.cost) + '개</b></p><p class="hint">교환한 도장은 사라지고, 남은 도장부터 다시 모아요.</p>') +
+      '</div><div class="actions"><button class="btn btn-dark" data-action="close">취소</button>' +
+      '<button class="btn btn-green" data-action="do-exchange" data-id="' + esc(id) + '">교환하기</button></div>');
+  }
+
+  function doExchange(id) {
+    var keepYm = S.ym;
+    call('exchangeReward', S.name, id, S.walletYm).then(function (data) {
+      var c = data.newCoupon;
+      // 달력은 보던 달 유지
+      if (keepYm !== data.ym) { data.records = S.data.records; data.ym = keepYm; }
+      applyMonth(data);
+      cpTab('have');
+      openModal('<h3>🎉 쿠폰 발급 완료!</h3><div class="coupon-list">' +
+        couponHTML({ code: c.code, rewardName: c.rewardName, desc: c.desc, icon: c.icon, ym: c.ym, issuedAt: '방금', used: false }) + '</div>' +
+        (c.cost ? '<p class="hint">' + (+c.ym.slice(5)) + '월 남은 도장 ' + c.balanceAfter + '개</p>' : '') +
+        '<div class="actions"><button class="btn btn-green" data-action="close">확인</button></div>');
+    });
   }
 
   function couponHTML(c, admin) {
     return '<div class="coupon ' + (c.used ? 'used' : '') + '">' +
-      '<div class="c-ico">' + Sprites.get('logo') + '</div>' +
-      '<div class="c-body"><div class="c-code">' + esc(c.code) + '</div>' +
-      '<div class="c-meta">' + (admin === true ? '<b>' + esc(c.name) + '</b> · ' : '') + esc(c.reason) + '</div>' +
-      '<div class="c-meta">발급 ' + esc(c.issuedAt) + (c.used ? ' · 사용 ' + esc(c.usedAt) : '') + '</div></div>' +
+      '<div class="c-ico">' + Sprites.get(c.icon || 'ticket') + '</div>' +
+      '<div class="c-body"><div class="c-code">' + esc(c.rewardName) + '</div>' +
+      '<div class="c-meta">' + (admin === true ? '<b>' + esc(c.name) + '</b> · ' : '') + esc(c.desc) + '</div>' +
+      '<div class="c-meta">코드 <b>' + esc(c.code) + '</b></div>' +
+      '<div class="c-meta">' + (c.ym ? (+c.ym.slice(5)) + '월 도장 · ' : '') + '발급 ' + esc(c.issuedAt) + (c.used ? ' · 사용 ' + esc(c.usedAt) : '') + '</div></div>' +
       (admin === true ? '<button class="btn btn-s ' + (c.used ? 'btn-dark' : 'btn-red') + '" data-action="use-coupon" data-code="' + esc(c.code) + '">' + (c.used ? '되돌리기' : '사용처리') + '</button>' : '') +
       '<span class="c-tag">' + (c.used ? '사용완료' : '사용가능') + '</span></div>';
   }
@@ -283,10 +358,7 @@
 
   function review(date, name, decision) {
     call('adminReview', S.admin, date, name, decision).then(function (res) {
-      if (res.coupon) {
-        openModal('<h3>🎟 쿠폰 자동 발급!</h3><div class="coupon-list">' + couponHTML({ code: res.coupon.code, name: res.coupon.name, reason: res.coupon.reason, issuedAt: '방금', used: false }, true).replace(/<button[\s\S]*?<\/button>/, '') + '</div>' +
-          '<div class="actions"><button class="btn btn-green" data-action="close">확인</button></div>');
-      } else toast(name + ' · ' + decision + ' 처리 완료');
+      toast(name + ' · ' + decision + ' 처리 완료');
       adminSearch();
     });
   }
@@ -319,11 +391,17 @@
       else if (a === 'game-rank') showRanking();
       else if (a === 'admin-search') adminSearch();
       else if (a === 'review') review(el.getAttribute('data-date'), el.getAttribute('data-name'), el.getAttribute('data-d'));
+      else if (a === 'goto-coupon') { userPane('pane-coupon'); cpTab('have'); }
+      else if (a === 'wallet-month') { S.walletYm = el.getAttribute('data-ym'); renderCoupons(); }
+      else if (a === 'exchange') askExchange(el.getAttribute('data-id'));
+      else if (a === 'do-exchange') doExchange(el.getAttribute('data-id'));
       else if (a === 'use-coupon') call('adminUseCoupon', S.admin, el.getAttribute('data-code')).then(renderAdminCoupons);
       return;
     }
     var nav = e.target.closest('[data-pane]');
     if (nav) return userPane(nav.getAttribute('data-pane'));
+    var ct = e.target.closest('[data-cp-tab]');
+    if (ct) return cpTab(ct.getAttribute('data-cp-tab'));
     var at = e.target.closest('[data-admin-tab]');
     if (at) return adminTab(at.getAttribute('data-admin-tab'));
     if (e.target.id === 'modal') closeModal();

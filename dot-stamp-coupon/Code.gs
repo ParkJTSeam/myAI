@@ -5,7 +5,8 @@
  *  - Users   : 사용자 목록
  *  - Records : 날짜별 운동 수치 / 자동판정 / 관리자 승인상태
  *  - Admins  : 관리자 이름 / 비밀번호  ← 시트에서 언제든 수정 가능
- *  - Coupons : 발급된 쿠폰
+ *  - Coupons : 도장을 소모해 교환한 쿠폰
+ *  - Rewards : 교환 가능한 보상 목록 (필요 도장 수 / 만근)  ← 시트에서 수정 가능
  *  - Games   : 미니게임(도트 과일 합치기) 점수
  *  - Config  : 통과 기준 수치, 쿠폰 발급 기준 등 설정값
  */
@@ -18,7 +19,8 @@ const SHEETS = {
   USERS:   { name: 'Users',   headers: ['이름', '가입일시', '최근접속'] },
   RECORDS: { name: 'Records', headers: ['날짜', '이름', '운동수치', '자동판정', '승인상태', '처리관리자', '처리일시', '입력일시'] },
   ADMINS:  { name: 'Admins',  headers: ['관리자이름', '비밀번호', '메모'] },
-  COUPONS: { name: 'Coupons', headers: ['쿠폰코드', '이름', '발급일시', '발급사유', '사용여부', '사용일시'] },
+  COUPONS: { name: 'Coupons', headers: ['쿠폰코드', '이름', '발급일시', '보상ID', '보상이름', '대상월', '소모도장', '사용여부', '사용일시'] },
+  REWARDS: { name: 'Rewards', headers: ['보상ID', '보상이름', '설명', '필요도장', '아이콘'] },
   GAMES:   { name: 'Games',   headers: ['일시', '이름', '점수', '최고단계'] },
   CONFIG:  { name: 'Config',  headers: ['키', '값', '설명'] },
 };
@@ -26,8 +28,16 @@ const SHEETS = {
 const DEFAULT_CONFIG = [
   ['APP_TITLE', '도트 운동 도장판', '앱 제목'],
   ['PASS_THRESHOLD', 300, '이 값 이상이면 통과(초록), 미만이면 미통과(빨강)'],
-  ['COUPON_EVERY', 5, '승인 도장 N개를 모을 때마다 쿠폰 1장 자동 발급'],
+  ['EXCHANGE_GRACE_DAYS', 7, '지난달 도장을 다음 달 며칠까지 교환할 수 있는지 (월말 승인 지연 대비)'],
   ['COUPON_PREFIX', 'FIT', '쿠폰 코드 앞글자'],
+];
+
+// 필요도장: 숫자 = 그달 도장 N개 소모 / '만근' = 그달 모든 날짜 승인 시 (도장 소모 없음, 월 1회)
+const DEFAULT_REWARDS = [
+  ['AMERICANO', '아메리카노', '1,500원 이하 아메리카노 1잔', 7, 'coffee'],
+  ['MEAL', '식사 1회', '15,000원 이하 식사 1회', 14, 'meal'],
+  ['CASH30', '현금 30,000원', '현금 30,000원 지급', 21, 'cash'],
+  ['PERFECT', '만근 현금 50,000원', '그달 모든 날 승인 도장(만근) 달성 시', '만근', 'crown'],
 ];
 
 const STATUS = { PENDING: '대기', APPROVED: '승인', REJECTED: '비승인' };
@@ -57,7 +67,7 @@ function setup() {
 
 function getBootstrap() {
   const cfg = config_();
-  return { title: cfg.APP_TITLE, threshold: cfg.PASS_THRESHOLD, couponEvery: cfg.COUPON_EVERY, today: today_() };
+  return { title: cfg.APP_TITLE, threshold: cfg.PASS_THRESHOLD, today: today_() };
 }
 
 /* ───────────────────────── 사용자 ───────────────────────── */
@@ -93,18 +103,44 @@ function getUserMonth(name, ym) {
       if (st === STATUS.APPROVED) monthApproved++;
     }
   });
-  const coupons = rows_('COUPONS')
-    .filter(function (r) { return String(r[1]).trim() === name; })
-    .map(function (r) {
-      return { code: String(r[0]), issuedAt: dateTime_(r[2]), reason: String(r[3]), used: String(r[4]).trim() === '사용', usedAt: dateTime_(r[5]) };
-    })
-    .reverse();
   return {
     name: name, ym: ym, today: today_(),
-    threshold: cfg.PASS_THRESHOLD, couponEvery: cfg.COUPON_EVERY,
+    threshold: cfg.PASS_THRESHOLD,
     totalApproved: totalApproved, monthApproved: monthApproved,
-    records: records, coupons: coupons,
+    records: records,
+    rewards: rewards_(),
+    wallets: walletMonths_().map(function (m) { return wallet_(name, m); }),
+    coupons: userCoupons_(name),
   };
+}
+
+/* ───────────────────────── 도장 교환 (쿠폰) ───────────────────────── */
+
+/** 도장을 소모해서 보상 쿠폰으로 교환 */
+function exchangeReward(name, rewardId, ym) {
+  name = cleanName_(name);
+  ym = String(ym || '');
+  if (walletMonths_().indexOf(ym) < 0) throw new Error('지금은 ' + ym + ' 도장을 교환할 수 없어요.');
+  const reward = rewards_().filter(function (r) { return r.id === String(rewardId); })[0];
+  if (!reward) throw new Error('보상을 찾을 수 없어요.');
+  let coupon;
+  withLock_(function () {
+    const w = wallet_(name, ym);
+    let cost = 0;
+    if (reward.perfect) {
+      if (!w.perfect) throw new Error('만근(그달 모든 날 승인)을 달성해야 받을 수 있어요.');
+      if (w.claimed.indexOf(reward.id) >= 0) throw new Error('이번 달 만근 보상은 이미 받았어요.');
+    } else {
+      cost = reward.cost;
+      if (w.balance < cost) throw new Error('도장이 부족해요. (보유 ' + w.balance + ' / 필요 ' + cost + ')');
+    }
+    const code = makeCouponCode_(config_().COUPON_PREFIX);
+    sheet_('COUPONS').appendRow([code, name, nowStr_(), reward.id, reward.name, ym, cost, '미사용', '']);
+    coupon = { code: code, rewardName: reward.name, desc: reward.desc, icon: reward.icon, ym: ym, cost: cost, balanceAfter: w.balance - cost };
+  });
+  const data = getUserMonth(name, ym);
+  data.newCoupon = coupon;
+  return data;
 }
 
 function saveRecord(name, date, value) {
@@ -194,23 +230,19 @@ function adminReview(auth, date, name, decision) {
   const admin = verifyAdmin_(auth);
   if (decision !== STATUS.APPROVED && decision !== STATUS.REJECTED) throw new Error('잘못된 처리값입니다.');
   name = cleanName_(name);
-  let coupon = null;
   withLock_(function () {
     const sh = sheet_('RECORDS');
     const data = rows_('RECORDS');
     const idx = data.findIndex(function (r) { return date_(r[0]) === date && String(r[1]).trim() === name; });
     if (idx < 0) throw new Error('기록을 찾을 수 없어요.');
     sh.getRange(idx + 2, 5, 1, 3).setValues([[decision, admin, nowStr_()]]);
-    if (decision === STATUS.APPROVED) coupon = maybeIssueCoupon_(name);
   });
-  return { ok: true, coupon: coupon };
+  return { ok: true };
 }
 
 function adminListCoupons(auth) {
   verifyAdmin_(auth);
-  const list = rows_('COUPONS').filter(function (r) { return r[0] !== ''; }).map(function (r) {
-    return { code: String(r[0]), name: String(r[1]), issuedAt: dateTime_(r[2]), reason: String(r[3]), used: String(r[4]).trim() === '사용', usedAt: dateTime_(r[5]) };
-  }).reverse();
+  const list = rows_('COUPONS').filter(function (r) { return r[0] !== ''; }).map(couponObj_).reverse();
   return { list: list };
 }
 
@@ -221,8 +253,8 @@ function adminUseCoupon(auth, code) {
     const data = rows_('COUPONS');
     const idx = data.findIndex(function (r) { return String(r[0]) === String(code); });
     if (idx < 0) throw new Error('쿠폰을 찾을 수 없어요.');
-    const used = String(data[idx][4]).trim() === '사용';
-    sh.getRange(idx + 2, 5, 1, 2).setValues([used ? ['미사용', ''] : ['사용', nowStr_()]]);
+    const used = String(data[idx][7]).trim() === '사용';
+    sh.getRange(idx + 2, 8, 1, 2).setValues([used ? ['미사용', ''] : ['사용', nowStr_()]]);
   });
   return adminListCoupons(auth);
 }
@@ -237,19 +269,69 @@ function adminListGames(auth) {
 
 /* ───────────────────────── 내부 함수 ───────────────────────── */
 
-function maybeIssueCoupon_(name) {
-  const cfg = config_();
-  let count = 0;
+let rewardsCache_ = null;
+function rewards_() {
+  if (rewardsCache_) return rewardsCache_;
+  let rows = rows_('REWARDS').filter(function (r) { return String(r[0]).trim() !== ''; });
+  if (!rows.length) rows = DEFAULT_REWARDS;
+  rewardsCache_ = rows.map(function (r) {
+    const perfect = String(r[3]).trim() === '만근';
+    return { id: String(r[0]).trim(), name: String(r[1]), desc: String(r[2]), perfect: perfect, cost: perfect ? 0 : Math.max(1, Number(r[3]) || 0), icon: String(r[4] || 'ticket') };
+  }).sort(function (a, b) { return (a.perfect ? 1e9 : a.cost) - (b.perfect ? 1e9 : b.cost); });
+  return rewardsCache_;
+}
+
+/** 교환 가능한 달: 이번 달 + (이번 달 초 유예기간 동안) 지난달 */
+function walletMonths_() {
+  const t = today_();
+  const months = [t.slice(0, 7)];
+  if (Number(t.slice(8)) <= config_().EXCHANGE_GRACE_DAYS) months.push(prevMonth_(t.slice(0, 7)));
+  return months;
+}
+
+/** 한 달 도장 지갑: 승인 도장 수 - 교환에 소모한 도장 수 */
+function wallet_(name, ym) {
+  const approvedDays = {};
   rows_('RECORDS').forEach(function (r) {
-    if (String(r[1]).trim() === name && String(r[4]).trim() === STATUS.APPROVED) count++;
+    if (String(r[1]).trim() !== name || String(r[4]).trim() !== STATUS.APPROVED) return;
+    const d = date_(r[0]);
+    if (d.slice(0, 7) === ym) approvedDays[d] = true;
   });
-  if (count === 0 || count % cfg.COUPON_EVERY !== 0) return null;
-  const reason = '승인 도장 ' + count + '개 달성';
-  const exists = rows_('COUPONS').some(function (r) { return String(r[1]).trim() === name && String(r[3]) === reason; });
-  if (exists) return null;
-  const code = makeCouponCode_(cfg.COUPON_PREFIX);
-  sheet_('COUPONS').appendRow([code, name, nowStr_(), reason, '미사용', '']);
-  return { code: code, name: name, reason: reason };
+  const approved = Object.keys(approvedDays).length;
+  let used = 0;
+  const claimed = [];
+  rows_('COUPONS').forEach(function (r) {
+    if (String(r[1]).trim() !== name || month_(r[5]) !== ym) return;
+    used += Number(r[6]) || 0;
+    claimed.push(String(r[3]));
+  });
+  const p = ym.split('-');
+  const days = new Date(Number(p[0]), Number(p[1]), 0).getDate();
+  return { ym: ym, approved: approved, used: used, balance: Math.max(0, approved - used), days: days, perfect: approved >= days, claimed: claimed };
+}
+
+function userCoupons_(name) {
+  return rows_('COUPONS').filter(function (r) { return String(r[1]).trim() === name; }).map(couponObj_).reverse();
+}
+
+function couponObj_(r) {
+  const rw = rewards_().filter(function (x) { return x.id === String(r[3]); })[0] || {};
+  return {
+    code: String(r[0]), name: String(r[1]), issuedAt: dateTime_(r[2]), rewardId: String(r[3]), rewardName: String(r[4]),
+    desc: rw.desc || '', icon: rw.icon || 'ticket', ym: month_(r[5]), cost: Number(r[6]) || 0,
+    used: String(r[7]).trim() === '사용', usedAt: dateTime_(r[8]),
+  };
+}
+
+function prevMonth_(ym) {
+  const p = ym.split('-').map(Number);
+  const d = new Date(p[0], p[1] - 2, 1);
+  return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2);
+}
+
+function month_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, tz_(), 'yyyy-MM');
+  return String(v || '').trim().slice(0, 7);
 }
 
 function makeCouponCode_(prefix) {
@@ -303,6 +385,11 @@ function sheet_(key) {
       sh.appendRow(['admin', '1234', '기본 관리자 - 비밀번호를 꼭 바꾸세요. 행을 추가하면 관리자도 늘어납니다.']);
     }
     if (key === 'CONFIG') sh.getRange(2, 1, DEFAULT_CONFIG.length, 3).setValues(DEFAULT_CONFIG);
+    if (key === 'COUPONS') sh.getRange('F:F').setNumberFormat('@');
+    if (key === 'REWARDS') {
+      sh.getRange('D:D').setNumberFormat('@');
+      sh.getRange(2, 1, DEFAULT_REWARDS.length, 5).setValues(DEFAULT_REWARDS.map(function (r) { return r.map(String); }));
+    }
   }
   sheetCache_[key] = sh;
   return sh;
@@ -323,7 +410,7 @@ function config_() {
     if (k && r[1] !== '') o[k] = r[1];
   });
   o.PASS_THRESHOLD = Number(o.PASS_THRESHOLD) || 300;
-  o.COUPON_EVERY = Math.max(1, Math.floor(Number(o.COUPON_EVERY) || 5));
+  o.EXCHANGE_GRACE_DAYS = Math.max(0, Math.floor(Number(o.EXCHANGE_GRACE_DAYS) || 0));
   o.APP_TITLE = String(o.APP_TITLE || '도트 운동 도장판');
   return o;
 }

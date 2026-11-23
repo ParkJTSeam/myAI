@@ -118,6 +118,56 @@ var Sprites = (function () {
         '.KgGgGgGK.',
         '...KKKK...'], { K: '#1a1c2c', g: '#38b764', G: '#257179' });
     },
+    coffee: function () {
+      return fromStrings([
+        '..w..w....',
+        '...w..w...',
+        '..w..w....',
+        'KKKKKKKK..',
+        'KwwwwwwKKK',
+        'KwbbbbwK.K',
+        'KwbbbbwK.K',
+        'KwbbbbwKKK',
+        '.KwwwwK...',
+        'KKKKKKKKK.'], { K: K, w: '#f4f4f4', b: '#8b5a2b' });
+    },
+    meal: function () {
+      return fromStrings([
+        '.......K.K',
+        '......K.K.',
+        '..wwwwww..',
+        '.wwwwwwww.',
+        'KKKKKKKKKK',
+        'KrrrrrrrrK',
+        'KrrwrrrrrK',
+        '.KrrrrrrK.',
+        '..KKKKKK..',
+        '..KKKKKK..'], { K: K, w: '#f4f4f4', r: '#e43b44' });
+    },
+    cash: function () {
+      return fromStrings([
+        '..........',
+        'KKKKKKKKKK',
+        'KgggggggGK',
+        'KgGgKKgggK',
+        'KgggKyKggK',
+        'KgggKyKggK',
+        'KgggKKgGgK',
+        'KGgggggggK',
+        'KKKKKKKKKK',
+        '..........'], { K: K, g: '#a7f070', G: '#38b764', y: '#ffcd75' });
+    },
+    crown: function () {
+      return fromStrings([
+        '.........',
+        'y...y...y',
+        'yy.yyy.yy',
+        'yyyyyyyyy',
+        'yryyByyry',
+        'yyyyyyyyy',
+        'KKKKKKKKK',
+        '.........'], { K: '#b13e53', y: '#ffcd75', r: '#e43b44', B: '#3b5dc9' });
+    },
     logo: function () {
       return fromStrings([
         '................',
@@ -140,7 +190,7 @@ var Sprites = (function () {
   };
 
   var cache = {};
-  function get(name) { if (!cache[name]) cache[name] = lib[name](); return cache[name]; }
+  function get(name) { if (!lib[name]) name = 'ticket'; if (!cache[name]) cache[name] = lib[name](); return cache[name]; }
   function hydrate(root) {
     (root || document).querySelectorAll('[data-sprite]').forEach(function (el) {
       if (!el.firstChild) el.innerHTML = get(el.getAttribute('data-sprite'));
