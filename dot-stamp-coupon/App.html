@@ -1,0 +1,344 @@
+<script>
+(function () {
+  var S = { name: null, ym: null, data: null, admin: null, threshold: 300, today: null, gameReady: false };
+  var $ = function (id) { return document.getElementById(id); };
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
+  var store = {
+    get: function (k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+    set: function (k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} },
+  };
+
+  /* ── 서버 호출 ── */
+  var pending = 0;
+  function call(fn) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    return new Promise(function (resolve, reject) {
+      pending++; $('loading').classList.remove('hidden');
+      var done = function () { if (--pending <= 0) { pending = 0; $('loading').classList.add('hidden'); } };
+      var r = google.script.run
+        .withSuccessHandler(function (res) { done(); resolve(res); })
+        .withFailureHandler(function (err) { done(); toast((err && err.message) || String(err)); reject(err); });
+      r[fn].apply(r, args);
+    });
+  }
+  function quiet(fn) { // 로딩 표시 없는 호출
+    var args = Array.prototype.slice.call(arguments, 1);
+    return new Promise(function (resolve, reject) {
+      var r = google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);
+      r[fn].apply(r, args);
+    });
+  }
+
+  var toastT;
+  function toast(msg) {
+    var t = $('toast'); t.textContent = msg; t.classList.remove('hidden');
+    clearTimeout(toastT); toastT = setTimeout(function () { t.classList.add('hidden'); }, 2600);
+  }
+
+  function show(id) {
+    document.querySelectorAll('.screen').forEach(function (s) { s.classList.toggle('active', s.id === id); });
+  }
+  function openModal(html) { $('modal-box').innerHTML = html; $('modal').classList.remove('hidden'); Sprites.hydrate($('modal-box')); }
+  function closeModal() { $('modal').classList.add('hidden'); }
+
+  function stampHTML(status) {
+    if (status === '승인') return Sprites.get('stamp-pass');
+    if (status === '비승인') return Sprites.get('stamp-fail');
+    return '';
+  }
+  function fmtDate(d) { var p = d.split('-'); var w = '일월화수목금토'[new Date(+p[0], p[1] - 1, +p[2]).getDay()]; return (+p[1]) + '월 ' + (+p[2]) + '일 (' + w + ')'; }
+
+  /* ── 로그인 ── */
+  document.querySelectorAll('[data-login-tab]').forEach(function (b) {
+    b.onclick = function () {
+      var t = b.getAttribute('data-login-tab');
+      document.querySelectorAll('[data-login-tab]').forEach(function (x) { x.classList.toggle('active', x === b); });
+      $('form-user').classList.toggle('hidden', t !== 'user');
+      $('form-admin').classList.toggle('hidden', t !== 'admin');
+    };
+  });
+
+  $('form-user').onsubmit = function (e) {
+    e.preventDefault();
+    var name = $('in-user-name').value.trim();
+    if (!name) return toast('이름을 입력하세요.');
+    call('userLogin', name).then(function (data) {
+      S.name = data.name; store.set('dot_user', data.name);
+      enterUser(data);
+    });
+  };
+
+  $('form-admin').onsubmit = function (e) {
+    e.preventDefault();
+    var auth = { name: $('in-admin-name').value.trim(), password: $('in-admin-pw').value };
+    call('adminLogin', auth).then(function (res) {
+      S.admin = auth; S.today = res.today; S.threshold = res.threshold;
+      $('in-admin-pw').value = '';
+      $('a-name').textContent = res.name;
+      $('f-date').value = '';
+      show('scr-admin');
+      adminTab('rec');
+    });
+  };
+
+  function logout() {
+    FruitGame.stop();
+    S.name = null; S.admin = null; S.data = null;
+    store.set('dot_user', null);
+    show('scr-login');
+  }
+
+  /* ── 사용자 화면 ── */
+  function enterUser(data) {
+    $('u-name').textContent = data.name;
+    show('scr-user');
+    userPane('pane-cal');
+    applyMonth(data);
+  }
+
+  function applyMonth(data) {
+    S.data = data; S.ym = data.ym; S.today = data.today; S.threshold = data.threshold;
+    renderToday(); renderCalendar(); renderCoupons();
+  }
+
+  function loadMonth(ym) { return call('getUserMonth', S.name, ym).then(applyMonth); }
+
+  function renderToday() {
+    var t = S.today, box = $('today-box');
+    var rec = (S.ym === t.slice(0, 7)) ? S.data.records[t] : null;
+    // 다른 달을 보고 있어도 오늘 정보는 유지: 오늘 달이 아니면 캐시 사용
+    if (S.ym === t.slice(0, 7)) S.todayRec = rec || null;
+    rec = S.todayRec;
+    var cls = rec ? (rec.pass ? 'pass' : 'fail') : '';
+    var stamp, val, msg;
+    if (!rec) {
+      stamp = '<div class="empty-box">?</div>';
+      val = '<span style="color:var(--muted)">- - -</span>';
+      msg = '오늘 운동 기록을 입력하세요! (' + S.threshold + ' 이상 통과)';
+    } else {
+      stamp = rec.status === '대기' ? '<div class="empty-box" style="font-size:1em;padding:12%">' + Sprites.get('hourglass') + '</div>' : stampHTML(rec.status);
+      val = rec.value + (rec.pass ? ' <small>통과!</small>' : ' <small>미통과</small>');
+      msg = rec.status === '대기' ? '관리자 확인을 기다리는 중...' : rec.status === '승인' ? '승인 도장 획득! 🎉' : '이번엔 비승인이에요. 내일 다시!';
+    }
+    box.className = 'today px-box ' + cls;
+    box.innerHTML =
+      '<div class="t-stamp">' + stamp + '</div>' +
+      '<div class="t-info"><div class="t-date">TODAY · ' + fmtDate(t) + '</div>' +
+      '<div class="t-val">' + val + '</div><div class="t-msg">' + msg + '</div></div>' +
+      ((!rec || rec.status === '대기') ? '<button class="btn btn-s btn-yellow" data-action="input" data-date="' + t + '">' + (rec ? '수정' : '기록') + '</button>' : '');
+  }
+
+  function renderCalendar() {
+    var p = S.ym.split('-'), y = +p[0], m = +p[1];
+    $('cal-title').textContent = y + '. ' + (m < 10 ? '0' + m : m);
+    var first = new Date(y, m - 1, 1).getDay(), days = new Date(y, m, 0).getDate();
+    var html = '';
+    for (var i = 0; i < first; i++) html += '<div class="cell blank"></div>';
+    for (var d = 1; d <= days; d++) {
+      var ds = S.ym + '-' + (d < 10 ? '0' + d : d), rec = S.data.records[ds];
+      var cls = 'cell';
+      if (ds > S.today) cls += ' future';
+      if (rec) cls += rec.pass ? ' pass' : ' fail';
+      if (ds === S.today) cls += ' today';
+      var inner = '<span class="dn">' + d + '</span>';
+      if (rec) {
+        inner += '<span class="dv">' + rec.value + '</span>';
+        if (rec.status === '대기') inner += '<span class="pend">' + Sprites.get('hourglass') + '</span>';
+        else inner += '<span class="st">' + stampHTML(rec.status) + '</span>';
+      }
+      html += '<button class="' + cls + '" data-action="input" data-date="' + ds + '">' + inner + '</button>';
+    }
+    $('cal-grid').innerHTML = html;
+    var cur = S.today.slice(0, 7);
+    document.querySelector('[data-action="next-month"]').disabled = S.ym >= cur;
+  }
+
+  function shiftMonth(delta) {
+    var p = S.ym.split('-'), dt = new Date(+p[0], +p[1] - 1 + delta, 1);
+    var ym = dt.getFullYear() + '-' + ('0' + (dt.getMonth() + 1)).slice(-2);
+    if (ym > S.today.slice(0, 7)) return;
+    loadMonth(ym);
+  }
+
+  function openInput(date) {
+    if (date > S.today) return toast('미래 날짜는 기록할 수 없어요.');
+    var rec = S.data.records[date];
+    if (rec && rec.status !== '대기') {
+      return openModal(
+        '<h3>' + fmtDate(date) + '</h3><div class="center"><div class="big-stamp">' + stampHTML(rec.status) + '</div>' +
+        '<p>운동 수치 <b>' + rec.value + '</b> · ' + (rec.pass ? '통과' : '미통과') + '</p>' +
+        '<p class="hint">관리자가 <b>' + rec.status + '</b> 처리한 기록이에요.</p></div>' +
+        '<div class="actions"><button class="btn btn-dark" data-action="close">닫기</button></div>');
+    }
+    openModal(
+      '<h3>' + fmtDate(date) + ' 운동 기록</h3>' +
+      '<input class="big-input" id="m-val" type="number" inputmode="numeric" min="0" max="100000" placeholder="0" value="' + (rec ? rec.value : '') + '">' +
+      '<div class="quick">' + [10, 50, 100, -10].map(function (n) { return '<button class="btn btn-dark" data-action="quick" data-n="' + n + '">' + (n > 0 ? '+' : '') + n + '</button>'; }).join('') + '</div>' +
+      '<div class="judge" id="m-judge">수치를 입력하세요</div>' +
+      '<p class="hint">' + S.threshold + ' 이상이면 통과! 저장 후 관리자가 승인하면 도장이 찍혀요.</p>' +
+      '<div class="actions"><button class="btn btn-dark" data-action="close">취소</button>' +
+      '<button class="btn btn-green" data-action="save" data-date="' + date + '">저장</button></div>');
+    var inp = $('m-val');
+    inp.oninput = judge; judge();
+    setTimeout(function () { inp.focus(); }, 50);
+  }
+  function judge() {
+    var v = $('m-val').value, j = $('m-judge');
+    if (v === '') { j.className = 'judge'; j.textContent = '수치를 입력하세요'; return; }
+    var pass = Number(v) >= S.threshold;
+    j.className = 'judge ' + (pass ? 'pass' : 'fail');
+    j.textContent = pass ? '★ 통과! (' + v + ' ≥ ' + S.threshold + ')' : '✕ 미통과 (' + (S.threshold - Number(v)) + ' 부족)';
+  }
+
+  function saveInput(date) {
+    var v = $('m-val').value;
+    if (v === '') return toast('수치를 입력하세요.');
+    call('saveRecord', S.name, date, v).then(function (data) {
+      closeModal(); applyMonth(data);
+      toast(Number(v) >= S.threshold ? '저장 완료! 통과 기준 달성 🟩' : '저장 완료! 아직 기준 미달 🟥');
+    });
+  }
+
+  function renderCoupons() {
+    var d = S.data, n = d.couponEvery, have = d.totalApproved % n;
+    $('cp-every').textContent = n;
+    $('cp-left').textContent = (n - have) + '개 남음';
+    var slots = '';
+    for (var i = 0; i < n; i++) slots += '<div class="slot">' + (i < have ? Sprites.get('stamp-pass') : (i + 1)) + '</div>';
+    $('cp-slots').style.gridTemplateColumns = 'repeat(' + Math.min(n, 5) + ', 1fr)';
+    $('cp-slots').innerHTML = slots;
+    $('cp-list').innerHTML = d.coupons.length ? d.coupons.map(couponHTML).join('') : '<div class="empty">아직 받은 쿠폰이 없어요.<br>도장을 모아보세요!</div>';
+  }
+
+  function couponHTML(c, admin) {
+    return '<div class="coupon ' + (c.used ? 'used' : '') + '">' +
+      '<div class="c-ico">' + Sprites.get('logo') + '</div>' +
+      '<div class="c-body"><div class="c-code">' + esc(c.code) + '</div>' +
+      '<div class="c-meta">' + (admin === true ? '<b>' + esc(c.name) + '</b> · ' : '') + esc(c.reason) + '</div>' +
+      '<div class="c-meta">발급 ' + esc(c.issuedAt) + (c.used ? ' · 사용 ' + esc(c.usedAt) : '') + '</div></div>' +
+      (admin === true ? '<button class="btn btn-s ' + (c.used ? 'btn-dark' : 'btn-red') + '" data-action="use-coupon" data-code="' + esc(c.code) + '">' + (c.used ? '되돌리기' : '사용처리') + '</button>' : '') +
+      '<span class="c-tag">' + (c.used ? '사용완료' : '사용가능') + '</span></div>';
+  }
+
+  function userPane(id) {
+    document.querySelectorAll('#scr-user .pane').forEach(function (p) { p.classList.toggle('active', p.id === id); });
+    document.querySelectorAll('.nav-btn').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-pane') === id); });
+    if (id === 'pane-game') {
+      if (!S.gameReady) {
+        FruitGame.init({
+          onScore: function (s) { $('g-score').textContent = s; },
+          onOver: function (score, maxLv) {
+            $('g-saved').textContent = '기록 저장 중...';
+            quiet('saveGameScore', S.name, score, maxLv).then(function (r) {
+              $('g-best').textContent = r.myBest;
+              var rank = r.top.findIndex(function (x) { return x.name === S.name; });
+              $('g-saved').textContent = '저장 완료! 최고 ' + r.myBest + '점' + (rank >= 0 ? ' · 전체 ' + (rank + 1) + '위' : '');
+            }).catch(function () { $('g-saved').textContent = '저장 실패 (네트워크 확인)'; });
+          },
+        });
+        S.gameReady = true;
+        quiet('getGameRanking', S.name).then(function (r) { $('g-best').textContent = r.myBest; });
+      }
+      FruitGame.start();
+    } else if (S.gameReady) FruitGame.stop();
+  }
+
+  function showRanking() {
+    call('getGameRanking', S.name).then(function (r) {
+      openModal('<h3>🏆 과일 합치기 TOP 10</h3>' +
+        (r.top.length ? '<table class="tbl"><tr><th>#</th><th>이름</th><th>최고점</th></tr>' +
+          r.top.map(function (x, i) { return '<tr' + (x.name === S.name ? ' style="background:#ffcd75"' : '') + '><td>' + (i + 1) + '</td><td>' + esc(x.name) + '</td><td>' + x.score + '</td></tr>'; }).join('') + '</table>'
+          : '<p class="empty" style="color:var(--muted)">아직 기록이 없어요.</p>') +
+        '<p class="hint">내 최고점 ' + r.myBest + ' · 플레이 ' + r.myPlays + '회</p>' +
+        '<div class="actions"><button class="btn btn-dark" data-action="close">닫기</button></div>');
+    });
+  }
+
+  /* ── 관리자 화면 ── */
+  function adminTab(t) {
+    document.querySelectorAll('[data-admin-tab]').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-admin-tab') === t); });
+    document.querySelectorAll('#scr-admin .pane').forEach(function (p) { p.classList.toggle('active', p.id === 'apane-' + t); });
+    if (t === 'rec') adminSearch();
+    if (t === 'cp') call('adminListCoupons', S.admin).then(renderAdminCoupons);
+    if (t === 'game') call('adminListGames', S.admin).then(renderAdminGames);
+  }
+
+  function adminSearch() {
+    var opts = { status: $('f-status').value, date: $('f-date').value, name: $('f-name').value };
+    call('adminListRecords', S.admin, opts).then(function (res) {
+      $('rec-count').textContent = '총 ' + res.total + '건' + (res.total > res.list.length ? ' (최근 ' + res.list.length + '건 표시)' : '') + ' · 기준 ' + res.threshold;
+      $('rec-list').innerHTML = res.list.length ? res.list.map(function (r) {
+        return '<div class="rec px-box">' +
+          '<div class="r-st">' + (r.status === '대기' ? Sprites.get('hourglass') : stampHTML(r.status)) + '</div>' +
+          '<div class="r-main"><div class="r-name">' + esc(r.name) + '</div>' +
+          '<div class="r-date">' + fmtDate(r.date) + ' · ' + esc(r.status) + (r.admin ? ' (' + esc(r.admin) + ')' : '') + '</div></div>' +
+          '<span class="r-val ' + (r.pass ? 'pass' : 'fail') + '">' + r.value + '</span>' +
+          '<div class="r-btns">' +
+          '<button class="btn btn-green" data-action="review" data-d="승인" data-date="' + r.date + '" data-name="' + esc(r.name) + '"' + (r.status === '승인' ? ' disabled' : '') + '>승인</button>' +
+          '<button class="btn btn-red" data-action="review" data-d="비승인" data-date="' + r.date + '" data-name="' + esc(r.name) + '"' + (r.status === '비승인' ? ' disabled' : '') + '>비승인</button>' +
+          '</div></div>';
+      }).join('') : '<div class="empty">조건에 맞는 기록이 없어요.</div>';
+    });
+  }
+
+  function review(date, name, decision) {
+    call('adminReview', S.admin, date, name, decision).then(function (res) {
+      if (res.coupon) {
+        openModal('<h3>🎟 쿠폰 자동 발급!</h3><div class="coupon-list">' + couponHTML({ code: res.coupon.code, name: res.coupon.name, reason: res.coupon.reason, issuedAt: '방금', used: false }, true).replace(/<button[\s\S]*?<\/button>/, '') + '</div>' +
+          '<div class="actions"><button class="btn btn-green" data-action="close">확인</button></div>');
+      } else toast(name + ' · ' + decision + ' 처리 완료');
+      adminSearch();
+    });
+  }
+
+  function renderAdminCoupons(res) {
+    $('acp-list').innerHTML = res.list.length ? res.list.map(function (c) { return couponHTML(c, true); }).join('') : '<div class="empty">발급된 쿠폰이 없어요.</div>';
+  }
+
+  function renderAdminGames(res) {
+    $('ag-list').innerHTML =
+      '<h3 class="sec-title">🏆 최고점 순위</h3>' +
+      (res.ranking.length ? '<table class="tbl"><tr><th>#</th><th>이름</th><th>최고점</th></tr>' + res.ranking.map(function (x, i) { return '<tr><td>' + (i + 1) + '</td><td>' + esc(x.name) + '</td><td>' + x.score + '</td></tr>'; }).join('') + '</table>' : '<div class="empty">기록 없음</div>') +
+      '<h3 class="sec-title">🕹 최근 플레이</h3>' +
+      (res.list.length ? '<table class="tbl"><tr><th>일시</th><th>이름</th><th>점수</th><th>과일</th></tr>' + res.list.map(function (x) { return '<tr><td>' + esc(x.at.slice(5)) + '</td><td>' + esc(x.name) + '</td><td>' + x.score + '</td><td>' + esc((FruitGame.FRUITS[x.maxLevel] || {}).n || '-') + '</td></tr>'; }).join('') + '</table>' : '<div class="empty">기록 없음</div>');
+  }
+
+  /* ── 이벤트 위임 ── */
+  document.addEventListener('click', function (e) {
+    var el = e.target.closest('[data-action]');
+    if (el && !el.disabled) {
+      var a = el.getAttribute('data-action');
+      if (a === 'logout') logout();
+      else if (a === 'prev-month') shiftMonth(-1);
+      else if (a === 'next-month') shiftMonth(1);
+      else if (a === 'input') openInput(el.getAttribute('data-date'));
+      else if (a === 'close') closeModal();
+      else if (a === 'save') saveInput(el.getAttribute('data-date'));
+      else if (a === 'quick') { var inp = $('m-val'); inp.value = Math.max(0, (Number(inp.value) || 0) + Number(el.getAttribute('data-n'))); judge(); }
+      else if (a === 'game-restart') FruitGame.reset();
+      else if (a === 'game-rank') showRanking();
+      else if (a === 'admin-search') adminSearch();
+      else if (a === 'review') review(el.getAttribute('data-date'), el.getAttribute('data-name'), el.getAttribute('data-d'));
+      else if (a === 'use-coupon') call('adminUseCoupon', S.admin, el.getAttribute('data-code')).then(renderAdminCoupons);
+      return;
+    }
+    var nav = e.target.closest('[data-pane]');
+    if (nav) return userPane(nav.getAttribute('data-pane'));
+    var at = e.target.closest('[data-admin-tab]');
+    if (at) return adminTab(at.getAttribute('data-admin-tab'));
+    if (e.target.id === 'modal') closeModal();
+  });
+  $('f-status').onchange = adminSearch;
+  $('f-date').onchange = adminSearch;
+
+  /* ── 시작 ── */
+  $('logo').innerHTML = Sprites.get('logo');
+  Sprites.hydrate();
+  var saved = store.get('dot_user');
+  if (saved) $('in-user-name').value = saved;
+  quiet('getBootstrap').then(function (b) {
+    S.threshold = b.threshold; S.today = b.today;
+    $('boot-th').textContent = b.threshold;
+  }).catch(function () {});
+})();
+</script>

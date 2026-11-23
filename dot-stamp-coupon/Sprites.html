@@ -1,0 +1,151 @@
+<script>
+/* ───────── 도트 스프라이트 (SVG 픽셀 아트) ───────── */
+var Sprites = (function () {
+  function svgFromGrid(grid, w, h, cls) {
+    var r = '';
+    for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) {
+      var c = grid[y][x];
+      if (c) r += '<rect x="' + x + '" y="' + y + '" width="1.02" height="1.02" fill="' + c + '"/>';
+    }
+    return '<svg class="' + (cls || '') + '" viewBox="0 0 ' + w + ' ' + h + '" shape-rendering="crispEdges" xmlns="http://www.w3.org/2000/svg">' + r + '</svg>';
+  }
+
+  function fromStrings(rows, pal, cls) {
+    var h = rows.length, w = rows[0].length, g = [];
+    for (var y = 0; y < h; y++) { g.push([]); for (var x = 0; x < w; x++) g[y].push(pal[rows[y][x]] || null); }
+    return svgFromGrid(g, w, h, cls);
+  }
+
+  function line(x0, y0, x1, y1, cb) {
+    var dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1, dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1, err = dx + dy;
+    for (;;) {
+      cb(x0, y0);
+      if (x0 === x1 && y0 === y1) break;
+      var e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x0 += sx; }
+      if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+  }
+
+  /* 승인(PASS) / 비승인(FAIL) 도장: 20x20 도트 */
+  function stamp(type) {
+    var N = 20, c = (N - 1) / 2, g = [];
+    var pass = type === 'pass';
+    var ring = pass ? '#1f7a3a' : '#a8182a';
+    var ring2 = pass ? '#38b764' : '#e43b44';
+    var fill = pass ? '#a7f070' : '#ff9a8c';
+    var mark = pass ? '#1f7a3a' : '#a8182a';
+    for (var y = 0; y < N; y++) {
+      g.push([]);
+      for (var x = 0; x < N; x++) {
+        var d = Math.sqrt((x - c) * (x - c) + (y - c) * (y - c));
+        var col = null;
+        if (d <= 9.7) col = d > 8.4 ? ring : (d > 7.4 ? ring2 : fill);
+        // 도장 잉크가 덜 묻은 느낌의 구멍
+        if (col && d > 8.4 && (x * 7 + y * 13) % 11 === 0) col = null;
+        g[y].push(col);
+      }
+    }
+    function put(x, y) { if (g[y] && x >= 0 && x < N) g[y][x] = mark; }
+    if (pass) {
+      line(5, 10, 8, 13, function (x, y) { put(x, y); put(x, y - 1); put(x + 1, y); });
+      line(8, 13, 14, 6, function (x, y) { put(x, y); put(x, y - 1); put(x + 1, y); });
+    } else {
+      line(6, 6, 13, 13, function (x, y) { put(x, y); put(x + 1, y); });
+      line(13, 6, 6, 13, function (x, y) { put(x, y); put(x + 1, y); });
+    }
+    return svgFromGrid(g, N, N, 'stamp ' + type);
+  }
+
+  var K = '#1a1c2c';
+  var lib = {
+    'stamp-pass': function () { return stamp('pass'); },
+    'stamp-fail': function () { return stamp('fail'); },
+    hourglass: function () {
+      return fromStrings([
+        'KKKKKKK',
+        '.KyyyK.',
+        '.KyyyK.',
+        '..KyK..',
+        '...K...',
+        '..K.K..',
+        '.K.y.K.',
+        '.KyyyK.',
+        'KKKKKKK'], { K: '#5d275d', y: '#ffcd75' });
+    },
+    dumbbell: function () {
+      return fromStrings([
+        'bb........bb',
+        'bbb......bbb',
+        'bbbwwwwwwbbb',
+        'bbb......bbb',
+        'bb........bb'], { b: '#73eff7', w: '#f4f4f4' });
+    },
+    calendar: function () {
+      return fromStrings([
+        '..K....K..',
+        'KKKKKKKKKK',
+        'KrrrrrrrrK',
+        'KKKKKKKKKK',
+        'KwwwwwwwwK',
+        'KwKwKwKwwK',
+        'KwwwwwwwwK',
+        'KwKwKwgggK',
+        'KwwwwwgggK',
+        'KKKKKKKKKK'], { K: '#94b0c2', r: '#e43b44', w: '#f4f4f4', g: '#38b764' });
+    },
+    ticket: function () {
+      return fromStrings([
+        '..........',
+        'yyyyyyyyyy',
+        'yyyyyKyyyy',
+        '.yyyyyyyy.',
+        '..yyyKyyy.',
+        '.yyyyyyyy.',
+        'yyyyyKyyyy',
+        'yyyyyyyyyy',
+        '..........'], { y: '#ffcd75', K: '#b13e53' });
+    },
+    melon: function () {
+      return fromStrings([
+        '...KKKK...',
+        '.KgGgGgGK.',
+        'KgGgGgGgGK',
+        'KGgGgGgGgK',
+        'KgGgGgGgGK',
+        'KGgGgGgGgK',
+        'KgGgGgGgGK',
+        '.KgGgGgGK.',
+        '...KKKK...'], { K: '#1a1c2c', g: '#38b764', G: '#257179' });
+    },
+    logo: function () {
+      return fromStrings([
+        '................',
+        '...KKKKKKKKKK...',
+        '..KyyyyyyyyyyK..',
+        '.KyyKKyyyyKKyyK.',
+        '.KyyKKyyyyKKyyK.',
+        '.KyyyyyyyyyyyyK.',
+        '.KyyyyyyyyyyyyK.',
+        '.KyyKyyyyyyKyyK.',
+        '.KyyyKKKKKKyyyK.',
+        '.KyyyyyyyyyyyyK.',
+        '..KyyyyyyyyyyK..',
+        '...KKKKKKKKKK...',
+        '..bb........bb..',
+        '.bbbwwwwwwwwbbb.',
+        '..bb........bb..',
+        '................'], { K: K, y: '#ffcd75', b: '#73eff7', w: '#f4f4f4' });
+    },
+  };
+
+  var cache = {};
+  function get(name) { if (!cache[name]) cache[name] = lib[name](); return cache[name]; }
+  function hydrate(root) {
+    (root || document).querySelectorAll('[data-sprite]').forEach(function (el) {
+      if (!el.firstChild) el.innerHTML = get(el.getAttribute('data-sprite'));
+    });
+  }
+  return { get: get, hydrate: hydrate };
+})();
+</script>

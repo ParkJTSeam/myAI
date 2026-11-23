@@ -1,0 +1,347 @@
+/**
+ * 도트 운동 도장판 + 쿠폰 발급 웹앱 (Google Apps Script)
+ *
+ * 시트 구성 (처음 실행 시 자동 생성)
+ *  - Users   : 사용자 목록
+ *  - Records : 날짜별 운동 수치 / 자동판정 / 관리자 승인상태
+ *  - Admins  : 관리자 이름 / 비밀번호  ← 시트에서 언제든 수정 가능
+ *  - Coupons : 발급된 쿠폰
+ *  - Games   : 미니게임(도트 과일 합치기) 점수
+ *  - Config  : 통과 기준 수치, 쿠폰 발급 기준 등 설정값
+ */
+
+// 비워두면 이 스크립트가 연결된(컨테이너 바인딩) 스프레드시트를 사용합니다.
+// 독립형 스크립트라면 스프레드시트 ID를 넣으세요.
+const SPREADSHEET_ID = '';
+
+const SHEETS = {
+  USERS:   { name: 'Users',   headers: ['이름', '가입일시', '최근접속'] },
+  RECORDS: { name: 'Records', headers: ['날짜', '이름', '운동수치', '자동판정', '승인상태', '처리관리자', '처리일시', '입력일시'] },
+  ADMINS:  { name: 'Admins',  headers: ['관리자이름', '비밀번호', '메모'] },
+  COUPONS: { name: 'Coupons', headers: ['쿠폰코드', '이름', '발급일시', '발급사유', '사용여부', '사용일시'] },
+  GAMES:   { name: 'Games',   headers: ['일시', '이름', '점수', '최고단계'] },
+  CONFIG:  { name: 'Config',  headers: ['키', '값', '설명'] },
+};
+
+const DEFAULT_CONFIG = [
+  ['APP_TITLE', '도트 운동 도장판', '앱 제목'],
+  ['PASS_THRESHOLD', 300, '이 값 이상이면 통과(초록), 미만이면 미통과(빨강)'],
+  ['COUPON_EVERY', 5, '승인 도장 N개를 모을 때마다 쿠폰 1장 자동 발급'],
+  ['COUPON_PREFIX', 'FIT', '쿠폰 코드 앞글자'],
+];
+
+const STATUS = { PENDING: '대기', APPROVED: '승인', REJECTED: '비승인' };
+
+/* ───────────────────────── 웹앱 진입 ───────────────────────── */
+
+function doGet() {
+  ensureSheets_();
+  const tpl = HtmlService.createTemplateFromFile('Index');
+  tpl.appTitle = config_().APP_TITLE;
+  return tpl.evaluate()
+    .setTitle(config_().APP_TITLE)
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+function include(filename) {
+  return HtmlService.createHtmlOutputFromFile(filename).getContent();
+}
+
+/** 편집기에서 한 번 실행하면 모든 시트를 만들어 줍니다. (선택) */
+function setup() {
+  ensureSheets_();
+}
+
+/* ───────────────────────── 공통 ───────────────────────── */
+
+function getBootstrap() {
+  const cfg = config_();
+  return { title: cfg.APP_TITLE, threshold: cfg.PASS_THRESHOLD, couponEvery: cfg.COUPON_EVERY, today: today_() };
+}
+
+/* ───────────────────────── 사용자 ───────────────────────── */
+
+function userLogin(name) {
+  name = cleanName_(name);
+  withLock_(function () {
+    const sh = sheet_('USERS');
+    const data = rows_('USERS');
+    const idx = data.findIndex(function (r) { return String(r[0]).trim() === name; });
+    const now = nowStr_();
+    if (idx >= 0) sh.getRange(idx + 2, 3).setValue(now);
+    else sh.appendRow([name, now, now]);
+  });
+  return getUserMonth(name, today_().slice(0, 7));
+}
+
+function getUserMonth(name, ym) {
+  name = cleanName_(name);
+  if (!/^\d{4}-\d{2}$/.test(String(ym))) ym = today_().slice(0, 7);
+  const cfg = config_();
+  const records = {};
+  let totalApproved = 0;
+  let monthApproved = 0;
+  rows_('RECORDS').forEach(function (r) {
+    if (String(r[1]).trim() !== name) return;
+    const d = date_(r[0]);
+    const st = String(r[4] || STATUS.PENDING).trim();
+    if (st === STATUS.APPROVED) totalApproved++;
+    if (d.slice(0, 7) === ym) {
+      const v = Number(r[2]);
+      records[d] = { value: v, pass: v >= cfg.PASS_THRESHOLD, status: st };
+      if (st === STATUS.APPROVED) monthApproved++;
+    }
+  });
+  const coupons = rows_('COUPONS')
+    .filter(function (r) { return String(r[1]).trim() === name; })
+    .map(function (r) {
+      return { code: String(r[0]), issuedAt: dateTime_(r[2]), reason: String(r[3]), used: String(r[4]).trim() === '사용', usedAt: dateTime_(r[5]) };
+    })
+    .reverse();
+  return {
+    name: name, ym: ym, today: today_(),
+    threshold: cfg.PASS_THRESHOLD, couponEvery: cfg.COUPON_EVERY,
+    totalApproved: totalApproved, monthApproved: monthApproved,
+    records: records, coupons: coupons,
+  };
+}
+
+function saveRecord(name, date, value) {
+  name = cleanName_(name);
+  date = String(date);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('날짜 형식이 올바르지 않아요.');
+  if (date > today_()) throw new Error('미래 날짜는 기록할 수 없어요.');
+  const v = Number(value);
+  if (String(value).trim() === '' || !isFinite(v) || v < 0 || v > 100000) throw new Error('0 ~ 100000 사이의 숫자를 입력하세요.');
+  const cfg = config_();
+  const auto = v >= cfg.PASS_THRESHOLD ? '통과' : '미통과';
+
+  withLock_(function () {
+    const sh = sheet_('RECORDS');
+    const data = rows_('RECORDS');
+    const idx = data.findIndex(function (r) { return date_(r[0]) === date && String(r[1]).trim() === name; });
+    const now = nowStr_();
+    if (idx >= 0) {
+      const st = String(data[idx][4]).trim();
+      if (st === STATUS.APPROVED || st === STATUS.REJECTED) throw new Error('관리자가 이미 처리한 기록은 수정할 수 없어요.');
+      sh.getRange(idx + 2, 3, 1, 3).setValues([[v, auto, STATUS.PENDING]]);
+      sh.getRange(idx + 2, 8).setValue(now);
+    } else {
+      sh.appendRow([date, name, v, auto, STATUS.PENDING, '', '', now]);
+    }
+  });
+  return getUserMonth(name, date.slice(0, 7));
+}
+
+/* ───────────────────────── 미니게임 ───────────────────────── */
+
+function saveGameScore(name, score, maxLevel) {
+  name = cleanName_(name);
+  score = Math.max(0, Math.min(1000000, Math.floor(Number(score) || 0)));
+  maxLevel = Math.max(0, Math.min(20, Math.floor(Number(maxLevel) || 0)));
+  withLock_(function () { sheet_('GAMES').appendRow([nowStr_(), name, score, maxLevel]); });
+  return getGameRanking(name);
+}
+
+function getGameRanking(name) {
+  const best = {};
+  let plays = 0;
+  rows_('GAMES').forEach(function (r) {
+    const n = String(r[1]).trim();
+    const s = Number(r[2]) || 0;
+    if (name && n === name) plays++;
+    if (!(n in best) || s > best[n]) best[n] = s;
+  });
+  const list = Object.keys(best).map(function (n) { return { name: n, score: best[n] }; })
+    .sort(function (a, b) { return b.score - a.score; });
+  return { top: list.slice(0, 10), myBest: name && best[name] != null ? best[name] : 0, myPlays: plays };
+}
+
+/* ───────────────────────── 관리자 ───────────────────────── */
+
+function adminLogin(auth) {
+  const admin = verifyAdmin_(auth);
+  return { name: admin, today: today_(), threshold: config_().PASS_THRESHOLD };
+}
+
+/** opts: { status: '대기'|'승인'|'비승인'|'전체', date: 'yyyy-MM-dd' | '', name: '' } */
+function adminListRecords(auth, opts) {
+  verifyAdmin_(auth);
+  opts = opts || {};
+  const cfg = config_();
+  const status = opts.status || STATUS.PENDING;
+  const date = String(opts.date || '');
+  const q = String(opts.name || '').trim();
+  const list = [];
+  rows_('RECORDS').forEach(function (r) {
+    const d = date_(r[0]);
+    const n = String(r[1]).trim();
+    const st = String(r[4] || STATUS.PENDING).trim();
+    if (!d || !n) return;
+    if (status !== '전체' && st !== status) return;
+    if (date && d !== date) return;
+    if (q && n.indexOf(q) < 0) return;
+    const v = Number(r[2]);
+    list.push({ date: d, name: n, value: v, pass: v >= cfg.PASS_THRESHOLD, status: st, admin: String(r[5] || ''), reviewedAt: dateTime_(r[6]) });
+  });
+  list.sort(function (a, b) { return a.date < b.date ? 1 : a.date > b.date ? -1 : a.name.localeCompare(b.name); });
+  return { list: list.slice(0, 300), total: list.length, threshold: cfg.PASS_THRESHOLD };
+}
+
+/** decision: '승인' | '비승인' */
+function adminReview(auth, date, name, decision) {
+  const admin = verifyAdmin_(auth);
+  if (decision !== STATUS.APPROVED && decision !== STATUS.REJECTED) throw new Error('잘못된 처리값입니다.');
+  name = cleanName_(name);
+  let coupon = null;
+  withLock_(function () {
+    const sh = sheet_('RECORDS');
+    const data = rows_('RECORDS');
+    const idx = data.findIndex(function (r) { return date_(r[0]) === date && String(r[1]).trim() === name; });
+    if (idx < 0) throw new Error('기록을 찾을 수 없어요.');
+    sh.getRange(idx + 2, 5, 1, 3).setValues([[decision, admin, nowStr_()]]);
+    if (decision === STATUS.APPROVED) coupon = maybeIssueCoupon_(name);
+  });
+  return { ok: true, coupon: coupon };
+}
+
+function adminListCoupons(auth) {
+  verifyAdmin_(auth);
+  const list = rows_('COUPONS').filter(function (r) { return r[0] !== ''; }).map(function (r) {
+    return { code: String(r[0]), name: String(r[1]), issuedAt: dateTime_(r[2]), reason: String(r[3]), used: String(r[4]).trim() === '사용', usedAt: dateTime_(r[5]) };
+  }).reverse();
+  return { list: list };
+}
+
+function adminUseCoupon(auth, code) {
+  verifyAdmin_(auth);
+  withLock_(function () {
+    const sh = sheet_('COUPONS');
+    const data = rows_('COUPONS');
+    const idx = data.findIndex(function (r) { return String(r[0]) === String(code); });
+    if (idx < 0) throw new Error('쿠폰을 찾을 수 없어요.');
+    const used = String(data[idx][4]).trim() === '사용';
+    sh.getRange(idx + 2, 5, 1, 2).setValues([used ? ['미사용', ''] : ['사용', nowStr_()]]);
+  });
+  return adminListCoupons(auth);
+}
+
+function adminListGames(auth) {
+  verifyAdmin_(auth);
+  const list = rows_('GAMES').map(function (r) {
+    return { at: dateTime_(r[0]), name: String(r[1]), score: Number(r[2]) || 0, maxLevel: Number(r[3]) || 0 };
+  }).reverse().slice(0, 200);
+  return { list: list, ranking: getGameRanking('').top };
+}
+
+/* ───────────────────────── 내부 함수 ───────────────────────── */
+
+function maybeIssueCoupon_(name) {
+  const cfg = config_();
+  let count = 0;
+  rows_('RECORDS').forEach(function (r) {
+    if (String(r[1]).trim() === name && String(r[4]).trim() === STATUS.APPROVED) count++;
+  });
+  if (count === 0 || count % cfg.COUPON_EVERY !== 0) return null;
+  const reason = '승인 도장 ' + count + '개 달성';
+  const exists = rows_('COUPONS').some(function (r) { return String(r[1]).trim() === name && String(r[3]) === reason; });
+  if (exists) return null;
+  const code = makeCouponCode_(cfg.COUPON_PREFIX);
+  sheet_('COUPONS').appendRow([code, name, nowStr_(), reason, '미사용', '']);
+  return { code: code, name: name, reason: reason };
+}
+
+function makeCouponCode_(prefix) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i < 8; i++) s += chars.charAt(Math.floor(Math.random() * chars.length));
+  return String(prefix || 'FIT') + '-' + s.slice(0, 4) + '-' + s.slice(4);
+}
+
+function verifyAdmin_(auth) {
+  const name = String((auth && auth.name) || '').trim();
+  const pw = String((auth && auth.password) || '');
+  if (!name || !pw) throw new Error('관리자 이름과 비밀번호를 입력하세요.');
+  const ok = rows_('ADMINS').some(function (r) {
+    return String(r[0]).trim() === name && String(r[1]).trim() === pw.trim() && String(r[1]).trim() !== '';
+  });
+  if (!ok) throw new Error('관리자 정보가 올바르지 않아요.');
+  return name;
+}
+
+function cleanName_(name) {
+  name = String(name || '').trim().replace(/\s+/g, ' ');
+  if (!name) throw new Error('이름을 입력하세요.');
+  if (name.length > 20) throw new Error('이름은 20자 이하로 입력하세요.');
+  if (/^[=+\-@]/.test(name)) throw new Error('이름은 =, +, -, @ 로 시작할 수 없어요.');
+  return name;
+}
+
+function ss_() {
+  return SPREADSHEET_ID ? SpreadsheetApp.openById(SPREADSHEET_ID) : SpreadsheetApp.getActiveSpreadsheet();
+}
+
+function ensureSheets_() {
+  Object.keys(SHEETS).forEach(function (k) { sheet_(k); });
+}
+
+const sheetCache_ = {};
+function sheet_(key) {
+  if (sheetCache_[key]) return sheetCache_[key];
+  const def = SHEETS[key];
+  const ss = ss_();
+  let sh = ss.getSheetByName(def.name);
+  if (!sh) {
+    sh = ss.insertSheet(def.name);
+    sh.getRange(1, 1, 1, def.headers.length).setValues([def.headers])
+      .setFontWeight('bold').setBackground('#222034').setFontColor('#ffffff');
+    sh.setFrozenRows(1);
+    if (key === 'RECORDS') sh.getRange('A:A').setNumberFormat('@');
+    if (key === 'ADMINS') {
+      sh.getRange('B:B').setNumberFormat('@');
+      sh.appendRow(['admin', '1234', '기본 관리자 - 비밀번호를 꼭 바꾸세요. 행을 추가하면 관리자도 늘어납니다.']);
+    }
+    if (key === 'CONFIG') sh.getRange(2, 1, DEFAULT_CONFIG.length, 3).setValues(DEFAULT_CONFIG);
+  }
+  sheetCache_[key] = sh;
+  return sh;
+}
+
+function rows_(key) {
+  const sh = sheet_(key);
+  const n = sh.getLastRow() - 1;
+  if (n <= 0) return [];
+  return sh.getRange(2, 1, n, SHEETS[key].headers.length).getValues();
+}
+
+function config_() {
+  const o = {};
+  DEFAULT_CONFIG.forEach(function (r) { o[r[0]] = r[1]; });
+  rows_('CONFIG').forEach(function (r) {
+    const k = String(r[0]).trim();
+    if (k && r[1] !== '') o[k] = r[1];
+  });
+  o.PASS_THRESHOLD = Number(o.PASS_THRESHOLD) || 300;
+  o.COUPON_EVERY = Math.max(1, Math.floor(Number(o.COUPON_EVERY) || 5));
+  o.APP_TITLE = String(o.APP_TITLE || '도트 운동 도장판');
+  return o;
+}
+
+function withLock_(fn) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try { return fn(); } finally { lock.releaseLock(); }
+}
+
+function tz_() { return Session.getScriptTimeZone() || 'Asia/Seoul'; }
+function today_() { return Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd'); }
+function nowStr_() { return Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd HH:mm:ss'); }
+function date_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, tz_(), 'yyyy-MM-dd');
+  return String(v || '').trim();
+}
+function dateTime_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, tz_(), 'yyyy-MM-dd HH:mm');
+  return String(v || '').trim();
+}

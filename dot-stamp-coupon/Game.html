@@ -1,0 +1,214 @@
+<script>
+/* ───────── 미니게임: 도트 과일 합치기 (같은 과일끼리 합치면 다음 과일로!) ───────── */
+var FruitGame = (function () {
+  var W = 120, H = 168, LINE_Y = 30, HOLD_Y = 14;
+  var FRUITS = [
+    { n: '체리',     r: 4,  c: '#e43b44', d: '#8a1c2b' },
+    { n: '딸기',     r: 6,  c: '#ff5470', d: '#a8182a' },
+    { n: '포도',     r: 8,  c: '#8f5bd6', d: '#4b2a85' },
+    { n: '귤',       r: 10, c: '#ffa62b', d: '#b0590f' },
+    { n: '감',       r: 12, c: '#f77622', d: '#9e3c0c' },
+    { n: '사과',     r: 15, c: '#d7263d', d: '#7a1020' },
+    { n: '배',       r: 18, c: '#e8d44d', d: '#957d14' },
+    { n: '복숭아',   r: 21, c: '#ffb3c1', d: '#c0587a' },
+    { n: '파인애플', r: 25, c: '#f9c22b', d: '#a86a0a' },
+    { n: '멜론',     r: 29, c: '#b6e35a', d: '#5d8a1c' },
+    { n: '수박',     r: 34, c: '#38b764', d: '#1a4d2a' },
+  ];
+  var SCORE = [1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 66];
+  var G = 0.045, SUB = 3, DAMP = 0.992, MAXV = 3.2;
+
+  var cvs, ctx, nextCvs, nctx, onOver, onScore;
+  var fruits, aimX, cur, next, cooldown, score, maxLv, dangerT, over, running, raf, last, idSeq;
+  var sprites = [];
+
+  function hex(c) { return [parseInt(c.substr(1, 2), 16), parseInt(c.substr(3, 2), 16), parseInt(c.substr(5, 2), 16)]; }
+  function makeSprite(f, lv) {
+    var r = f.r, D = r * 2, c = document.createElement('canvas');
+    c.width = D; c.height = D;
+    var x2 = c.getContext('2d'), img = x2.createImageData(D, D), base = hex(f.c), dark = hex(f.d), ink = [26, 28, 44];
+    for (var y = 0; y < D; y++) for (var x = 0; x < D; x++) {
+      var dx = x + 0.5 - r, dy = y + 0.5 - r, d = Math.sqrt(dx * dx + dy * dy);
+      if (d > r) continue;
+      var col = base;
+      if (d > r - 1.1) col = ink;
+      else if (d > r - 2.2 && dx + dy > 0) col = dark;              // 오른쪽 아래 그림자
+      else if (lv === 10 && Math.floor((dx + r) / (r / 3.2)) % 2 === 0) col = [37, 113, 121]; // 수박 줄무늬
+      else if (lv === 9 && (x + y) % 6 === 0) col = [230, 255, 190]; // 멜론 그물
+      else if (lv === 8 && (x + y) % 5 === 0 && (x - y + 50) % 5 === 0) col = dark; // 파인애플
+      var hx = dx + r * 0.42, hy = dy + r * 0.42;
+      if (d <= r - 1.1 && hx * hx + hy * hy < (r * 0.22) * (r * 0.22)) col = [255, 255, 255]; // 하이라이트
+      var i = (y * D + x) * 4;
+      img.data[i] = col[0]; img.data[i + 1] = col[1]; img.data[i + 2] = col[2]; img.data[i + 3] = 255;
+    }
+    x2.putImageData(img, 0, 0);
+    // 귀여운 얼굴
+    if (r >= 6) {
+      x2.fillStyle = '#1a1c2c';
+      var e = Math.max(1, Math.round(r / 8)), ex = Math.round(r * 0.38), ey = Math.round(r * 0.95);
+      x2.fillRect(r - ex - e, ey, e, e + (r > 14 ? 1 : 0));
+      x2.fillRect(r + ex, ey, e, e + (r > 14 ? 1 : 0));
+      x2.fillRect(r - e, ey + e + 1, e * 2, e);
+    }
+    // 꼭지
+    x2.fillStyle = '#257179';
+    var s = Math.max(1, Math.round(r / 6));
+    x2.fillRect(r - Math.ceil(s / 2), 0, s, s + 1);
+    return c;
+  }
+
+  function init(opts) {
+    cvs = document.getElementById('g-canvas'); ctx = cvs.getContext('2d');
+    nextCvs = document.getElementById('g-next'); nctx = nextCvs.getContext('2d');
+    ctx.imageSmoothingEnabled = false; nctx.imageSmoothingEnabled = false;
+    onOver = opts.onOver; onScore = opts.onScore;
+    FRUITS.forEach(function (f, i) { sprites[i] = makeSprite(f, i); });
+    var evo = document.getElementById('g-evo');
+    evo.innerHTML = '';
+    FRUITS.forEach(function (f, i) {
+      var c = document.createElement('canvas');
+      var s = Math.max(6, Math.round(f.r * 0.6)) * 2;
+      c.width = f.r * 2; c.height = f.r * 2; c.style.width = (s / 6.5) + 'em'; c.title = f.n;
+      c.getContext('2d').drawImage(sprites[i], 0, 0);
+      evo.appendChild(c);
+    });
+    function px(e) { var r = cvs.getBoundingClientRect(); return (e.clientX - r.left) / r.width * W; }
+    cvs.addEventListener('pointerdown', function (e) { if (over) return; aimX = px(e); cvs.setPointerCapture(e.pointerId); });
+    cvs.addEventListener('pointermove', function (e) { if (!over) aimX = px(e); });
+    cvs.addEventListener('pointerup', function (e) { if (!over) { aimX = px(e); drop(); } });
+    reset();
+  }
+
+  function rnd() { return Math.floor(Math.random() * 5); }
+  function reset() {
+    fruits = []; score = 0; maxLv = 0; dangerT = 0; over = false; cooldown = 0; idSeq = 0;
+    aimX = W / 2; cur = rnd(); next = rnd();
+    onScore && onScore(score);
+    drawNext();
+    document.getElementById('g-over').classList.add('hidden');
+  }
+
+  function drawNext() {
+    nctx.clearRect(0, 0, 24, 24);
+    var s = sprites[next], k = Math.min(1, 20 / s.width), w = Math.round(s.width * k);
+    nctx.drawImage(s, Math.round(12 - w / 2), Math.round(12 - w / 2), w, w);
+  }
+
+  function drop() {
+    if (cooldown > 0 || over) return;
+    var r = FRUITS[cur].r, x = clampX(aimX, r);
+    fruits.push({ id: idSeq++, x: x, y: HOLD_Y, px: x, py: HOLD_Y - 0.3, r: r, lv: cur, born: performance.now() });
+    cur = next; next = rnd(); drawNext();
+    cooldown = 28;
+  }
+  function clampX(x, r) { return Math.max(r + 1, Math.min(W - r - 1, x)); }
+
+  function step() {
+    var i, j, a, b;
+    for (var s = 0; s < SUB; s++) {
+      for (i = 0; i < fruits.length; i++) {
+        a = fruits[i];
+        var vx = (a.x - a.px) * DAMP, vy = (a.y - a.py) * DAMP;
+        vx = Math.max(-MAXV, Math.min(MAXV, vx)); vy = Math.max(-MAXV, Math.min(MAXV, vy));
+        a.px = a.x; a.py = a.y;
+        a.x += vx; a.y += vy + G;
+      }
+      var merges = [];
+      for (var it = 0; it < 3; it++) {
+        for (i = 0; i < fruits.length; i++) {
+          a = fruits[i];
+          for (j = i + 1; j < fruits.length; j++) {
+            b = fruits[j];
+            var dx = b.x - a.x, dy = b.y - a.y, min = a.r + b.r, d2 = dx * dx + dy * dy;
+            if (d2 >= min * min) continue;
+            var d = Math.sqrt(d2) || 0.01;
+            if (a.lv === b.lv && !a.m && !b.m) { a.m = b.m = true; merges.push([a, b]); continue; }
+            var ov = (min - d), ma = a.r * a.r, mb = b.r * b.r, t = ma + mb;
+            var nx = dx / d, ny = dy / d;
+            a.x -= nx * ov * (mb / t); a.y -= ny * ov * (mb / t);
+            b.x += nx * ov * (ma / t); b.y += ny * ov * (ma / t);
+          }
+        }
+        for (i = 0; i < fruits.length; i++) {
+          a = fruits[i];
+          if (a.x < a.r) { a.x = a.r; }
+          if (a.x > W - a.r) { a.x = W - a.r; }
+          if (a.y > H - a.r) { a.y = H - a.r; a.px += (a.x - a.px) * 0.25; } // 바닥 마찰
+        }
+      }
+      if (merges.length) {
+        merges.forEach(function (p) {
+          var A = p[0], B = p[1];
+          fruits = fruits.filter(function (f) { return f !== A && f !== B; });
+          var lv = A.lv;
+          if (lv >= FRUITS.length - 1) { score += 100; return; } // 수박+수박 = 펑!
+          var nl = lv + 1, mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2, r = FRUITS[nl].r;
+          mx = clampX(mx, r); my = Math.min(H - r, my);
+          fruits.push({ id: idSeq++, x: mx, y: my, px: mx, py: my, r: r, lv: nl, born: performance.now() - 600, pop: 8 });
+          score += SCORE[nl]; maxLv = Math.max(maxLv, nl);
+        });
+        onScore && onScore(score);
+      }
+    }
+  }
+
+  function checkOver(dt) {
+    var now = performance.now(), danger = false;
+    for (var i = 0; i < fruits.length; i++) {
+      var f = fruits[i];
+      if (now - f.born > 1500 && f.y - f.r < LINE_Y) { danger = true; break; }
+    }
+    dangerT = danger ? dangerT + dt : 0;
+    if (dangerT > 1800) gameOver();
+  }
+
+  function gameOver() {
+    over = true;
+    document.getElementById('g-final').textContent = score;
+    document.getElementById('g-over').classList.remove('hidden');
+    onOver && onOver(score, maxLv);
+  }
+
+  function draw() {
+    ctx.fillStyle = '#f4e6c4'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#eddcb2';
+    for (var y = 0; y < H; y += 8) for (var x = (y / 8) % 2 ? 0 : 4; x < W; x += 8) ctx.fillRect(x, y, 4, 4);
+    // 데드라인
+    var blink = dangerT > 0 && Math.floor(performance.now() / 150) % 2;
+    ctx.fillStyle = blink ? '#e43b44' : '#c09a6b';
+    for (var lx = 0; lx < W; lx += 4) ctx.fillRect(lx, LINE_Y, 2, 1);
+    // 조준선 + 들고있는 과일
+    if (!over && cooldown <= 0) {
+      var r = FRUITS[cur].r, ax = Math.round(clampX(aimX, r));
+      ctx.fillStyle = 'rgba(26,28,44,.25)';
+      for (var gy = HOLD_Y + r; gy < H; gy += 4) ctx.fillRect(ax, gy, 1, 2);
+      ctx.drawImage(sprites[cur], ax - r, HOLD_Y - r);
+    }
+    fruits.forEach(function (f) {
+      var s = sprites[f.lv];
+      if (f.pop > 0) {
+        var k = 1 + f.pop * 0.02, w = Math.round(f.r * 2 * k);
+        ctx.drawImage(s, Math.round(f.x - w / 2), Math.round(f.y - w / 2), w, w);
+        f.pop--;
+      } else ctx.drawImage(s, Math.round(f.x - f.r), Math.round(f.y - f.r));
+    });
+  }
+
+  function loop(t) {
+    if (!running) return;
+    var dt = Math.min(50, t - (last || t)); last = t;
+    if (!over) {
+      var n = Math.max(1, Math.round(dt / 16.67));
+      for (var k = 0; k < n; k++) { step(); if (cooldown > 0) cooldown--; }
+      checkOver(dt);
+    }
+    draw();
+    raf = requestAnimationFrame(loop);
+  }
+
+  function start() { if (running) return; running = true; last = 0; raf = requestAnimationFrame(loop); }
+  function stop() { running = false; cancelAnimationFrame(raf); }
+
+  return { init: init, start: start, stop: stop, reset: reset, FRUITS: FRUITS };
+})();
+</script>

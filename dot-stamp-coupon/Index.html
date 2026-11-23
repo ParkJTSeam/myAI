@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <title><?= appTitle ?></title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/galmuri@2.40.3/dist/galmuri.css">
+  <?!= include('Style'); ?>
+</head>
+<body>
+  <div id="app">
+    <div class="wrap">
+
+      <!-- ───── 로그인 ───── -->
+      <section id="scr-login" class="screen active">
+        <div class="login-hero">
+          <div class="logo" id="logo"></div>
+          <h1 class="title" id="app-title"><?= appTitle ?></h1>
+          <p class="sub">매일 운동하고 도장 모아서 쿠폰 받자!</p>
+        </div>
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-login-tab="user">사용자</button>
+          <button class="tab" data-login-tab="admin">관리자</button>
+        </div>
+        <form id="form-user" class="px-box form">
+          <label>이름</label>
+          <input id="in-user-name" maxlength="20" autocomplete="name" placeholder="이름을 입력하세요">
+          <button class="btn btn-green" type="submit">▶ START</button>
+        </form>
+        <form id="form-admin" class="px-box form hidden">
+          <label>관리자 이름</label>
+          <input id="in-admin-name" maxlength="20" placeholder="관리자 이름">
+          <label>비밀번호</label>
+          <input id="in-admin-pw" type="password" placeholder="비밀번호">
+          <button class="btn btn-blue" type="submit">▶ 관리자 로그인</button>
+        </form>
+        <p class="foot">PRESS START · <span id="boot-th">300</span> 이상이면 통과!</p>
+      </section>
+
+      <!-- ───── 사용자 메인 ───── -->
+      <section id="scr-user" class="screen">
+        <header class="topbar">
+          <div class="who"><span class="mini-logo" data-sprite="dumbbell"></span><b id="u-name"></b></div>
+          <button class="btn btn-s btn-dark" data-action="logout">나가기</button>
+        </header>
+
+        <div class="content">
+          <!-- 달력 탭 -->
+          <div class="pane active" id="pane-cal">
+            <div class="today px-box" id="today-box"></div>
+            <div class="cal px-box">
+              <div class="cal-head">
+                <button class="btn btn-s btn-dark" data-action="prev-month">◀</button>
+                <b id="cal-title"></b>
+                <button class="btn btn-s btn-dark" data-action="next-month">▶</button>
+              </div>
+              <div class="cal-week"><span class="sun">일</span><span>월</span><span>화</span><span>수</span><span>목</span><span>금</span><span class="sat">토</span></div>
+              <div class="cal-grid" id="cal-grid"></div>
+              <div class="legend">
+                <span><i class="lg pass"></i>통과</span>
+                <span><i class="lg fail"></i>미통과</span>
+                <span><i class="lg-st" data-sprite="stamp-pass"></i>승인</span>
+                <span><i class="lg-st" data-sprite="stamp-fail"></i>비승인</span>
+                <span><i class="lg-st" data-sprite="hourglass"></i>대기</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 쿠폰 탭 -->
+          <div class="pane" id="pane-coupon">
+            <div class="px-box progress-box">
+              <div class="row-between"><b>다음 쿠폰까지</b><span id="cp-left"></span></div>
+              <div class="slots" id="cp-slots"></div>
+              <p class="hint">관리자 승인 도장 <b id="cp-every">5</b>개마다 쿠폰 1장이 자동 발급돼요.</p>
+            </div>
+            <h3 class="sec-title">🎟 내 쿠폰함</h3>
+            <div id="cp-list" class="coupon-list"></div>
+          </div>
+
+          <!-- 게임 탭 -->
+          <div class="pane" id="pane-game">
+            <div class="game-hud">
+              <div class="hud-cell"><small>SCORE</small><b id="g-score">0</b></div>
+              <div class="hud-cell"><small>NEXT</small><canvas id="g-next" width="24" height="24"></canvas></div>
+              <div class="hud-cell"><small>BEST</small><b id="g-best">0</b></div>
+              <button class="btn btn-s btn-dark" data-action="game-rank">순위</button>
+            </div>
+            <div class="game-stage" id="g-stage">
+              <canvas id="g-canvas" width="120" height="168"></canvas>
+              <div class="g-over hidden" id="g-over">
+                <div class="px-box over-box">
+                  <h2 class="blink">GAME OVER</h2>
+                  <p>점수 <b id="g-final">0</b></p>
+                  <p class="hint" id="g-saved">기록 저장 중...</p>
+                  <button class="btn btn-green" data-action="game-restart">다시 하기</button>
+                </div>
+              </div>
+            </div>
+            <div class="evo" id="g-evo"></div>
+          </div>
+        </div>
+
+        <nav class="bottom-nav">
+          <button class="nav-btn active" data-pane="pane-cal"><span data-sprite="calendar"></span>달력</button>
+          <button class="nav-btn" data-pane="pane-coupon"><span data-sprite="ticket"></span>쿠폰함</button>
+          <button class="nav-btn" data-pane="pane-game"><span data-sprite="melon"></span>미니게임</button>
+        </nav>
+      </section>
+
+      <!-- ───── 관리자 ───── -->
+      <section id="scr-admin" class="screen">
+        <header class="topbar admin">
+          <div class="who"><span class="badge">ADMIN</span><b id="a-name"></b></div>
+          <button class="btn btn-s btn-dark" data-action="logout">나가기</button>
+        </header>
+        <div class="tabs">
+          <button class="tab active" data-admin-tab="rec">승인 관리</button>
+          <button class="tab" data-admin-tab="cp">쿠폰</button>
+          <button class="tab" data-admin-tab="game">게임 기록</button>
+        </div>
+        <div class="content">
+          <div class="pane active" id="apane-rec">
+            <div class="filters px-box">
+              <select id="f-status">
+                <option value="대기">승인 대기</option>
+                <option value="전체">전체</option>
+                <option value="승인">승인됨</option>
+                <option value="비승인">비승인</option>
+              </select>
+              <input id="f-date" type="date">
+              <input id="f-name" placeholder="이름 검색">
+              <button class="btn btn-s btn-blue" data-action="admin-search">조회</button>
+            </div>
+            <p class="hint" id="rec-count"></p>
+            <div id="rec-list" class="rec-list"></div>
+          </div>
+          <div class="pane" id="apane-cp"><div id="acp-list" class="coupon-list"></div></div>
+          <div class="pane" id="apane-game"><div id="ag-list"></div></div>
+        </div>
+      </section>
+
+      <!-- ───── 모달 ───── -->
+      <div class="modal hidden" id="modal">
+        <div class="px-box modal-box" id="modal-box"></div>
+      </div>
+      <div class="loading hidden" id="loading"><div class="px-box"><span class="spin" data-sprite="hourglass"></span> LOADING<span class="dots">...</span></div></div>
+      <div class="toast hidden" id="toast"></div>
+    </div>
+  </div>
+
+  <?!= include('Sprites'); ?>
+  <?!= include('Game'); ?>
+  <?!= include('App'); ?>
+</body>
+</html>
