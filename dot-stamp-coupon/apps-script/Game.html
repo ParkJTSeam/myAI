@@ -18,7 +18,7 @@ var FruitGame = (function () {
   var SCORE = [1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 66];
   var G = 0.045, SUB = 3, DAMP = 0.992, MAXV = 3.2;
 
-  var cvs, ctx, nextCvs, nctx, onOver, onScore, onReset, paused = false;
+  var cvs, ctx, nextCvs, nctx, onOver, onScore, onReset, onLockedTap, paused = false, locked = false;
   var fruits, aimX, cur, next, cooldown, score, maxLv, dangerT, over, running, raf, last, idSeq;
   var sprites = [];
 
@@ -61,7 +61,7 @@ var FruitGame = (function () {
     cvs = document.getElementById('g-canvas'); ctx = cvs.getContext('2d');
     nextCvs = document.getElementById('g-next'); nctx = nextCvs.getContext('2d');
     ctx.imageSmoothingEnabled = false; nctx.imageSmoothingEnabled = false;
-    onOver = opts.onOver; onScore = opts.onScore; onReset = opts.onReset;
+    onOver = opts.onOver; onScore = opts.onScore; onReset = opts.onReset; onLockedTap = opts.onLockedTap;
     FRUITS.forEach(function (f, i) { sprites[i] = makeSprite(f, i); });
     var evo = document.getElementById('g-evo');
     evo.innerHTML = '';
@@ -73,18 +73,18 @@ var FruitGame = (function () {
       evo.appendChild(c);
     });
     function px(e) { var r = cvs.getBoundingClientRect(); return (e.clientX - r.left) / r.width * W; }
-    cvs.addEventListener('pointerdown', function (e) { if (over || blocked()) return; aimX = px(e); cvs.setPointerCapture(e.pointerId); });
+    cvs.addEventListener('pointerdown', function (e) { if (locked && !over) { onLockedTap && onLockedTap(); return; } if (over || blocked()) return; aimX = px(e); cvs.setPointerCapture(e.pointerId); });
     cvs.addEventListener('pointermove', function (e) { if (!over && !blocked()) aimX = px(e); });
     cvs.addEventListener('pointerup', function (e) { if (!over && !blocked()) { aimX = px(e); drop(); } });
     reset();
   }
 
   // 팝업(모달)이 열려 있으면 게임 일시정지
-  function blocked() { var m = document.getElementById('modal'); return paused || (m && !m.classList.contains('hidden')); }
+  function blocked() { var m = document.getElementById('modal'); return paused || locked || (m && !m.classList.contains('hidden')); }
 
   function rnd() { return Math.floor(Math.random() * 5); }
   function reset() {
-    fruits = []; score = 0; maxLv = 0; dangerT = 0; over = false; cooldown = 0; idSeq = 0;
+    fruits = []; score = 0; maxLv = 0; dangerT = 0; over = false; cooldown = 0; idSeq = 0; locked = true;
     aimX = W / 2; cur = rnd(); next = rnd();
     onScore && onScore(score);
     drawNext();
@@ -188,6 +188,10 @@ var FruitGame = (function () {
       for (var gy = HOLD_Y + r; gy < H; gy += 4) ctx.fillRect(ax, gy, 1, 2);
       ctx.drawImage(sprites[cur], ax - r, HOLD_Y - r);
     }
+    if (locked && !over) {
+      ctx.fillStyle = 'rgba(26,28,44,.55)'; ctx.fillRect(0, H / 2 - 12, W, 24);
+      if (Math.floor(performance.now() / 500) % 2) { ctx.fillStyle = '#ffcd75'; ctx.font = '8px Galmuri11, monospace'; ctx.textAlign = 'center'; ctx.fillText('TAP TO START', W / 2, H / 2 + 3); }
+    }
     fruits.forEach(function (f) {
       var s = sprites[f.lv];
       if (f.pop > 0) {
@@ -214,8 +218,9 @@ var FruitGame = (function () {
   function stop() { running = false; cancelAnimationFrame(raf); }
 
   function pause() { paused = true; }
+  function setLocked(v) { locked = !!v; }
   function resume() { paused = false; last = 0; }
   function getScore() { return score; }
-  return { init: init, start: start, stop: stop, reset: reset, pause: pause, resume: resume, getScore: getScore, FRUITS: FRUITS };
+  return { init: init, start: start, stop: stop, reset: reset, pause: pause, resume: resume, setLocked: setLocked, isOver: function () { return over; }, getScore: getScore, FRUITS: FRUITS };
 })();
 </script>

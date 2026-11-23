@@ -29,6 +29,7 @@ HTML 파일은 이름 입력 시 ".html" 을 빼고 입력 (예: Index)
  *  - Rewards : 교환 가능한 보상 목록 (필요 도장 수 / 만근)  ← 시트에서 수정 가능
  *  - Games   : 미니게임(도트 과일 합치기) 점수
  *  - GameRewards : 미니게임 점수 보상 목록 (등급별)  ← 시트에서 수정 가능
+ *  - GamePlays : 미니게임 남은 플레이 횟수 (자동 관리)
  *  - Config  : 통과 기준 수치, 미니게임 보상 확률 등 설정값
  *
  * 버전: APP_VERSION 참고 / 변경 기록은 CHANGELOG.md
@@ -38,7 +39,7 @@ HTML 파일은 이름 입력 시 ".html" 을 빼고 입력 (예: Index)
 // 독립형 스크립트라면 스프레드시트 ID를 넣으세요.
 const SPREADSHEET_ID = '';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.2.1';
 
 const SHEETS = {
   USERS:   { name: 'Users',   headers: ['이름', '가입일시', '최근접속'] },
@@ -48,6 +49,7 @@ const SHEETS = {
   REWARDS: { name: 'Rewards', headers: ['보상ID', '보상이름', '설명', '필요도장', '아이콘'] },
   GAMES:   { name: 'Games',   headers: ['일시', '이름', '점수', '최고단계'] },
   GAME_REWARDS: { name: 'GameRewards', headers: ['등급', '보상이름', '설명'] },
+  GAME_PLAYS: { name: 'GamePlays', headers: ['이름', '남은횟수', '회복기준(ms)', '날짜'] },
   CONFIG:  { name: 'Config',  headers: ['키', '값', '설명'] },
 };
 
@@ -62,6 +64,8 @@ const DEFAULT_CONFIG = [
   ['GAME_DROP_INC', 5, '미니게임: 단계마다 늘어나는 당첨 확률(%p)'],
   ['GAME_DROP_MAX', 60, '미니게임: 최대 당첨 확률(%)'],
   ['GAME_DROP_DAILY_LIMIT', 3, '미니게임: 한 사람이 하루에 받을 수 있는 보상 수 (0 = 제한 없음)'],
+  ['GAME_PLAY_MAX', 3, '미니게임: 최대 플레이 가능 횟수 (매일 0시에 가득 참)'],
+  ['GAME_PLAY_RECOVER_MIN', 30, '미니게임: 플레이 횟수 1회가 회복되는 시간(분)'],
 ];
 
 // 미니게임 점수 보상 (등급: 노멀 / 레어 / 에픽 / 레전드)
@@ -160,7 +164,13 @@ function getUserMonth(name, ym) {
     rewards: rewards_(),
     wallets: walletMonths_().map(function (m) { return wallet_(name, m); }),
     coupons: userCoupons_(name),
+    rev: getRev_(name),
   };
+}
+
+/** 사용자 데이터 변경 번호 (가벼운 확인용 · 화면 자동 갱신에 사용) */
+function getUserRev(name) {
+  return { rev: getRev_(cleanName_(name)) };
 }
 
 /* ───────────────────────── 도장 교환 (쿠폰) ───────────────────────── */
@@ -187,6 +197,7 @@ function exchangeReward(name, rewardId, ym) {
     sheet_('COUPONS').appendRow([code, name, nowStr_(), reward.id, reward.name, ym, cost, '미사용', '']);
     coupon = { code: code, rewardName: reward.name, desc: reward.desc, icon: reward.icon, ym: ym, cost: cost, balanceAfter: w.balance - cost };
   });
+  bumpRev_(name);
   const data = getUserMonth(name, ym);
   data.newCoupon = coupon;
   return data;
@@ -216,41 +227,134 @@ function saveRecord(name, date, value) {
       sh.appendRow([date, name, v, auto, STATUS.PENDING, '', '', now]);
     }
   });
+  bumpRev_(name);
   return getUserMonth(name, date.slice(0, 7));
 }
 
 /* ───────────────────────── 미니게임 ───────────────────────── */
 
-function saveGameScore(name, score, maxLevel) {
+/** 게임 결과 저장. 세션(플레이 1회 사용)이 있어야 저장됨. 오늘/주간 최고 기록을 넘으면 플레이 횟수 전부 회복 */
+function saveGameScore(name, score, maxLevel, sessionId) {
   name = cleanName_(name);
   score = Math.max(0, Math.min(1000000, Math.floor(Number(score) || 0)));
   maxLevel = Math.max(0, Math.min(20, Math.floor(Number(maxLevel) || 0)));
-  withLock_(function () { sheet_('GAMES').appendRow([nowStr_(), name, score, maxLevel]); });
-  return getGameRanking(name);
+  return withLock_(function () {
+    const cache = CacheService.getScriptCache();
+    const key = 'gs_' + String(sessionId || '');
+    const raw = cache.get(key);
+    if (!raw) throw new Error('게임 세션이 만료돼서 기록을 저장하지 못했어요.');
+    const ses = JSON.parse(raw);
+    if (ses.name !== name) throw new Error('잘못된 게임 세션이에요.');
+    if (ses.saved) throw new Error('이미 저장된 게임이에요.');
+    ses.saved = true;
+    cache.put(key, JSON.stringify(ses), 21600);
+
+    const before = getGameRanking(name);
+    sheet_('GAMES').appendRow([nowStr_(), name, score, maxLevel]);
+    const records = [];
+    if (before.today.best && score > before.today.best.score) records.push('오늘');
+    if (before.week.best && score > before.week.best.score) records.push('주간');
+    let plays;
+    if (records.length) plays = playState_(name, function (st, now, max) { st.count = max; st.ts = now; });
+    else plays = playState_(name);
+    const after = getGameRanking(name);
+    after.records = records;
+    after.plays = plays;
+    after.score = score;
+    return after;
+  });
 }
 
+/**
+ * 순위: 오늘 / 이번 주(월요일 시작, 단 이번 달 1일 이전은 제외) / 이번 달.
+ * 모든 기록은 매달 1일에 새로 시작합니다.
+ */
 function getGameRanking(name) {
-  const best = {};
-  let plays = 0;
+  const today = today_();
+  const monthStart = today.slice(0, 8) + '01';
+  const weekStart = maxStr_(mondayOf_(today), monthStart);
+  const per = { today: {}, week: {}, month: {} };
+  let myPlaysToday = 0;
   rows_('GAMES').forEach(function (r) {
+    const d = dateTime_(r[0]).slice(0, 10);
+    if (d < monthStart || d > today) return;
     const n = String(r[1]).trim();
-    const s = Number(r[2]) || 0;
-    if (name && n === name) plays++;
-    if (!(n in best) || s > best[n]) best[n] = s;
+    const sc = Number(r[2]) || 0;
+    const put = function (o) { if (!(n in o) || sc > o[n]) o[n] = sc; };
+    put(per.month);
+    if (d >= weekStart) put(per.week);
+    if (d === today) { put(per.today); if (n === name) myPlaysToday++; }
   });
-  const list = Object.keys(best).map(function (n) { return { name: n, score: best[n] }; })
-    .sort(function (a, b) { return b.score - a.score; });
-  return { top: list.slice(0, 10), myBest: name && best[name] != null ? best[name] : 0, myPlays: plays };
+  const board = function (o) {
+    const top = Object.keys(o).map(function (n) { return { name: n, score: o[n] }; }).sort(function (a, b) { return b.score - a.score; });
+    return { top: top.slice(0, 10), best: top[0] || null, my: name && o[name] != null ? o[name] : 0 };
+  };
+  const res = { today: board(per.today), week: board(per.week), month: board(per.month), weekStart: weekStart, monthStart: monthStart };
+  res.top = res.month.top;          // 이전 버전 호환
+  res.myBest = res.month.my;
+  res.myPlays = myPlaysToday;
+  return res;
 }
+
+/** 남은 플레이 횟수 + 순위 (게임 화면용) */
+function getGameStatus(name) {
+  name = cleanName_(name);
+  const plays = withLock_(function () { return playState_(name); });
+  return { plays: plays, ranking: getGameRanking(name) };
+}
+
+/**
+ * 플레이 횟수 계산 (반드시 lock 안에서 호출).
+ * - 날짜가 바뀌면(0시) 최대치로 리셋
+ * - 최대치 미만이면 회복기준 시각부터 RECOVER_MIN 분마다 1회 회복
+ * mutate(st, now, max) 로 횟수를 바꾼 뒤 시트에 저장합니다.
+ */
+function playState_(name, mutate) {
+  const cfg = config_();
+  const max = cfg.GAME_PLAY_MAX, per = cfg.GAME_PLAY_RECOVER_MIN * 60000;
+  const sh = sheet_('GAME_PLAYS');
+  const data = rows_('GAME_PLAYS');
+  const idx = data.findIndex(function (r) { return String(r[0]).trim() === name; });
+  const now = Date.now(), today = today_();
+  let st = idx >= 0 ? { count: Number(data[idx][1]), ts: Number(data[idx][2]) || now, day: date_(data[idx][3]) } : null;
+  if (!st || st.day !== today || !isFinite(st.count)) st = { count: max, ts: now, day: today };
+  if (st.count > max) st.count = max;
+  if (st.count < max) {
+    const n = Math.floor((now - st.ts) / per);
+    if (n > 0) { st.count = Math.min(max, st.count + n); st.ts = st.count >= max ? now : st.ts + n * per; }
+  }
+  if (mutate) mutate(st, now, max);
+  const row = [name, st.count, st.ts, today];
+  if (idx >= 0) sh.getRange(idx + 2, 1, 1, 4).setValues([row]);
+  else sh.appendRow(row);
+  return { count: st.count, max: max, nextAt: st.count < max ? st.ts + per : null, now: now, recoverMin: cfg.GAME_PLAY_RECOVER_MIN };
+}
+
+function mondayOf_(ymd) {
+  const p = ymd.split('-').map(Number);
+  const dow = new Date(Date.UTC(p[0], p[1] - 1, p[2])).getUTCDay();
+  return addDays_(ymd, -((dow + 6) % 7));
+}
+function maxStr_(a, b) { return a > b ? a : b; }
 
 /* ───────────────────────── 미니게임 점수 보상 ───────────────────────── */
 
 /** 게임 한 판 시작: 추첨 중복을 막기 위한 세션 발급 */
 function startGameSession(name) {
   name = cleanName_(name);
-  const id = Utilities.getUuid();
-  CacheService.getScriptCache().put('gs_' + id, JSON.stringify({ name: name, rolled: [] }), 21600);
-  return { sessionId: id, info: dropInfo_(name) };
+  return withLock_(function () {
+    let ok = false;
+    const plays = playState_(name, function (st, now, max) {
+      if (st.count <= 0) return;
+      if (st.count >= max) st.ts = now; // 가득 찬 상태에서 쓰면 그때부터 회복 시간 계산
+      st.count--;
+      ok = true;
+    });
+    if (!ok) return { noPlays: true, plays: plays, info: dropInfo_(name) };
+    const id = Utilities.getUuid();
+    CacheService.getScriptCache().put('gs_' + id, JSON.stringify({ name: name, rolled: [], saved: false }), 21600);
+    return { sessionId: id, info: dropInfo_(name), plays: plays };
+  });
 }
 
 /** threshold(2500, 3000, ...) 를 넘었을 때 한 번 추첨. 당첨되면 쿠폰 발급 */
@@ -284,6 +388,7 @@ function rollGameDrop(name, sessionId, threshold, score) {
     const reward = pool.length ? pool[Math.floor(Math.random() * pool.length)] : all[Math.floor(Math.random() * all.length)];
     const code = makeCouponCode_(cfg.COUPON_PREFIX);
     sheet_('COUPONS').appendRow([code, name, nowStr_(), 'GAME', reward.name, '게임', 0, '미사용', '', reward.grade]);
+    bumpRev_(name);
     return {
       dropped: true, threshold: threshold, chance: chance, grade: reward.grade, rewardName: reward.name, desc: reward.desc, code: code,
       remainingToday: limit > 0 ? limit - todayCount - 1 : null,
@@ -386,6 +491,7 @@ function adminReview(auth, date, name, decision) {
     const idx = data.findIndex(function (r) { return date_(r[0]) === date && String(r[1]).trim() === name; });
     if (idx < 0) throw new Error('기록을 찾을 수 없어요.');
     sh.getRange(idx + 2, 5, 1, 3).setValues([[decision, admin, nowStr_()]]);
+    bumpRev_(name);
   });
   return { ok: true };
 }
@@ -454,6 +560,7 @@ function adminGrantStampRange(auth, name, from, to, value, memo, skipWeekend) {
     });
     if (newRows.length) sh.getRange(sh.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
   });
+  bumpRev_(name);
   res.ok = true;
   res.existed = res.updated > 0;
   res.wallet = wallet_(name, to > today ? today.slice(0, 7) : to.slice(0, 7));
@@ -490,6 +597,7 @@ function adminUseCoupon(auth, code) {
     const idx = data.findIndex(function (r) { return String(r[0]) === String(code); });
     if (idx < 0) throw new Error('쿠폰을 찾을 수 없어요.');
     const used = String(data[idx][7]).trim() === '사용';
+    bumpRev_(String(data[idx][1]).trim());
     sh.getRange(idx + 2, 8, 1, 2).setValues([used ? ['미사용', ''] : ['사용', nowStr_()]]);
   });
   return adminListCoupons(auth);
@@ -500,7 +608,8 @@ function adminListGames(auth) {
   const list = rows_('GAMES').map(function (r) {
     return { at: dateTime_(r[0]), name: String(r[1]), score: Number(r[2]) || 0, maxLevel: Number(r[3]) || 0 };
   }).reverse().slice(0, 200);
-  return { list: list, ranking: getGameRanking('').top };
+  const rk = getGameRanking('');
+  return { list: list, ranking: rk.month.top, today: rk.today.top, week: rk.week.top, weekStart: rk.weekStart };
 }
 
 /* ───────────────────────── 내부 함수 ───────────────────────── */
@@ -643,6 +752,7 @@ function sheet_(key) {
     }
     if (key === 'CONFIG') sh.getRange(2, 1, DEFAULT_CONFIG.length, 3).setValues(DEFAULT_CONFIG);
     if (key === 'COUPONS') sh.getRange('F:F').setNumberFormat('@');
+    if (key === 'GAME_PLAYS') sh.getRange('D:D').setNumberFormat('@');
     if (key === 'GAME_REWARDS') sh.getRange(2, 1, DEFAULT_GAME_REWARDS.length, 3).setValues(DEFAULT_GAME_REWARDS);
     if (key === 'REWARDS') {
       sh.getRange('D:D').setNumberFormat('@');
@@ -672,14 +782,27 @@ function config_() {
   });
   o.PASS_THRESHOLD = Number(o.PASS_THRESHOLD) || 300;
   o.EXCHANGE_GRACE_DAYS = Math.max(0, Math.floor(Number(o.EXCHANGE_GRACE_DAYS) || 0));
-  ['GAME_DROP_START', 'GAME_DROP_STEP', 'GAME_DROP_BASE', 'GAME_DROP_INC', 'GAME_DROP_MAX', 'GAME_DROP_DAILY_LIMIT'].forEach(function (k) {
+  ['GAME_DROP_START', 'GAME_DROP_STEP', 'GAME_DROP_BASE', 'GAME_DROP_INC', 'GAME_DROP_MAX', 'GAME_DROP_DAILY_LIMIT', 'GAME_PLAY_MAX', 'GAME_PLAY_RECOVER_MIN'].forEach(function (k) {
     const def = DEFAULT_CONFIG.filter(function (r) { return r[0] === k; })[0][1];
     const n = Number(o[k]);
     o[k] = isFinite(n) && String(o[k]).trim() !== '' ? n : def;
   });
   o.GAME_DROP_STEP = Math.max(1, o.GAME_DROP_STEP);
+  o.GAME_PLAY_MAX = Math.max(1, Math.floor(o.GAME_PLAY_MAX));
+  o.GAME_PLAY_RECOVER_MIN = Math.max(1, o.GAME_PLAY_RECOVER_MIN);
   o.APP_TITLE = String(o.APP_TITLE || '도트 운동 도장판');
   return o;
+}
+
+/** 사용자별 변경 번호: 도장/쿠폰이 바뀔 때마다 갱신 → 화면이 감지해서 즉시 새로고침 */
+function bumpRev_(name) {
+  CacheService.getScriptCache().put('rev_' + name, String(Date.now()), 21600);
+}
+function getRev_(name) {
+  const c = CacheService.getScriptCache();
+  let v = c.get('rev_' + name);
+  if (!v) { v = String(Date.now()); c.put('rev_' + name, v, 21600); }
+  return v;
 }
 
 function withLock_(fn) {
@@ -750,6 +873,7 @@ function dateTime_(v) {
         <header class="topbar">
           <div class="who"><span class="mini-logo" data-sprite="dumbbell"></span><b id="u-name"></b></div>
           <div class="top-actions">
+            <button class="btn btn-s btn-green chip" data-action="goto-stamps" title="이번 달 보유 도장"><span class="chip-ico" data-sprite="stamp-pass"></span><b id="hdr-stamp">0</b></button>
             <button class="btn btn-s btn-yellow" data-action="goto-coupon" title="보유 쿠폰">🎟 <b id="hdr-cp">0</b></button>
             <button class="btn btn-s btn-dark" data-action="logout">나가기</button>
           </div>
@@ -798,13 +922,15 @@ function dateTime_(v) {
             <div class="game-hud">
               <div class="hud-cell"><small>SCORE</small><b id="g-score">0</b></div>
               <div class="hud-cell"><small>NEXT</small><canvas id="g-next" width="24" height="24"></canvas></div>
-              <div class="hud-cell"><small>BEST</small><b id="g-best">0</b></div>
-              <div class="hud-btns">
-                <button class="btn btn-s btn-dark" data-action="game-rank">순위</button>
-                <button class="btn btn-s btn-yellow" data-action="game-info" title="보상 확률">?</button>
-              </div>
+              <div class="hud-cell rec-cell"><small>오늘 최고</small><b id="g-today">-</b></div>
+              <div class="hud-cell rec-cell"><small>주간 최고</small><b id="g-week">-</b></div>
             </div>
-            <div class="gift-bar" id="g-giftbar"><span class="gift-ico" data-sprite="gift"></span><span id="g-gifttxt">???</span></div>
+            <div class="game-sub">
+              <div class="plays" id="g-plays" data-action="game-plays"><span class="hearts" id="g-hearts"></span><span class="ptime" id="g-ptime"></span></div>
+              <div class="gift-bar" id="g-giftbar"><span class="gift-ico" data-sprite="gift"></span><span id="g-gifttxt">???</span></div>
+              <button class="btn btn-s btn-dark" data-action="game-rank">순위</button>
+              <button class="btn btn-s btn-yellow" data-action="game-info" title="보상 확률">?</button>
+            </div>
             <div class="game-stage" id="g-stage">
               <canvas id="g-canvas" width="120" height="168"></canvas>
               <div class="g-over hidden" id="g-over">
@@ -812,6 +938,7 @@ function dateTime_(v) {
                   <h2 class="blink">GAME OVER</h2>
                   <p>점수 <b id="g-final">0</b></p>
                   <p class="hint" id="g-saved">기록 저장 중...</p>
+                  <p class="hint" id="g-over-plays"></p>
                   <button class="btn btn-green" data-action="game-restart">다시 하기</button>
                 </div>
               </div>
@@ -936,12 +1063,14 @@ function dateTime_(v) {
     -webkit-font-smoothing: none; font-smooth: never;
   }
 
-  /* 화면 맞춤: 휴대폰에서는 브라우저가 내준 공간을 꽉 채우고,
-     PC·가로모드처럼 넓은 화면에서는 폭을 세로의 9/14까지만 써서 폰 모양을 유지 */
+  /* 앱 크기: 세로 14.3 : 가로 9 고정 (화면 안에 들어가는 가장 큰 크기로, 가운데 정렬) */
   #app {
-    height: 100vh; height: 100dvh;
-    width: min(100vw, calc(100vh * 9 / 14));
-    width: min(100vw, calc(100dvh * 9 / 14));
+    width: min(100vw, calc(100vh * 9 / 14.3));
+    height: min(100vh, calc(100vw * 14.3 / 9));
+    width: min(100vw, calc(100dvh * 9 / 14.3));
+    height: min(100dvh, calc(100vw * 14.3 / 9));
+    aspect-ratio: 9 / 14.3;
+    flex-shrink: 0;
     position: relative; overflow: hidden;
     container-type: size;
     background:
@@ -1295,6 +1424,29 @@ function dateTime_(v) {
   .seg-btn.active { background: var(--blue); color: #fff; }
   .chk { display: flex; align-items: center; gap: .4em; font-size: .9em; color: var(--ink) !important; margin-top: .3em; }
   .chk input { width: 1.1em; height: 1.1em; margin: 0; box-shadow: none; padding: 0; }
+
+  /* ───── v1.2.1 ───── */
+  .chip { display: inline-flex; align-items: center; gap: .2em; }
+  .chip-ico { width: 1.1em; height: 1.1em; display: inline-block; }
+  .chip.bump { animation: bump .6s steps(3) 2; }
+  @keyframes bump { 50% { transform: scale(1.35); background: var(--yellow); color: var(--ink); } }
+  .cell.fresh .st .stamp { animation: stamp-in .5s steps(5) both; }
+  .cell.fresh { animation: fresh 1s steps(2) 3; }
+  @keyframes fresh { 50% { box-shadow: inset 0 0 0 3px var(--yellow); } }
+  .rec-cell small { white-space: nowrap; }
+  .game-sub { display: flex; align-items: stretch; gap: .25em; }
+  .game-sub .gift-bar { flex: 1; min-width: 0; white-space: normal; line-height: 1.15; text-align: center; word-break: keep-all; }
+  .game-sub .btn { margin: 0; padding: .2em .5em; }
+  .plays { display: flex; align-items: center; gap: .3em; background: var(--ink); color: #fff; padding: .15em .4em; box-shadow: inset 0 0 0 2px #333c57; cursor: pointer; flex-shrink: 0; font-size: .75em; }
+  .plays .ptime { color: var(--yellow); min-width: 2.8em; text-align: right; }
+  .hearts { display: inline-flex; gap: 2px; vertical-align: middle; }
+  .hp { width: .9em; height: .8em; display: inline-block; background: #3e3f55;
+    clip-path: polygon(0 20%, 20% 0, 40% 0, 50% 15%, 60% 0, 80% 0, 100% 20%, 100% 45%, 50% 100%, 0 45%); }
+  .hp.on { background: #ff4d6d; }
+  .intro-plays { text-align: center; margin: .4em 0 0; font-size: .9em; }
+  .intro-plays .hearts { font-size: 1.3em; margin-right: .3em; }
+  .intro-plays small { color: var(--muted); }
+  .rec-fx .fx-grade { font-size: 2em; }
 </style>
 #################### END OF Style.html ####################
 
@@ -1542,7 +1694,7 @@ var FruitGame = (function () {
   var SCORE = [1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 66];
   var G = 0.045, SUB = 3, DAMP = 0.992, MAXV = 3.2;
 
-  var cvs, ctx, nextCvs, nctx, onOver, onScore, onReset, paused = false;
+  var cvs, ctx, nextCvs, nctx, onOver, onScore, onReset, onLockedTap, paused = false, locked = false;
   var fruits, aimX, cur, next, cooldown, score, maxLv, dangerT, over, running, raf, last, idSeq;
   var sprites = [];
 
@@ -1585,7 +1737,7 @@ var FruitGame = (function () {
     cvs = document.getElementById('g-canvas'); ctx = cvs.getContext('2d');
     nextCvs = document.getElementById('g-next'); nctx = nextCvs.getContext('2d');
     ctx.imageSmoothingEnabled = false; nctx.imageSmoothingEnabled = false;
-    onOver = opts.onOver; onScore = opts.onScore; onReset = opts.onReset;
+    onOver = opts.onOver; onScore = opts.onScore; onReset = opts.onReset; onLockedTap = opts.onLockedTap;
     FRUITS.forEach(function (f, i) { sprites[i] = makeSprite(f, i); });
     var evo = document.getElementById('g-evo');
     evo.innerHTML = '';
@@ -1597,18 +1749,18 @@ var FruitGame = (function () {
       evo.appendChild(c);
     });
     function px(e) { var r = cvs.getBoundingClientRect(); return (e.clientX - r.left) / r.width * W; }
-    cvs.addEventListener('pointerdown', function (e) { if (over || blocked()) return; aimX = px(e); cvs.setPointerCapture(e.pointerId); });
+    cvs.addEventListener('pointerdown', function (e) { if (locked && !over) { onLockedTap && onLockedTap(); return; } if (over || blocked()) return; aimX = px(e); cvs.setPointerCapture(e.pointerId); });
     cvs.addEventListener('pointermove', function (e) { if (!over && !blocked()) aimX = px(e); });
     cvs.addEventListener('pointerup', function (e) { if (!over && !blocked()) { aimX = px(e); drop(); } });
     reset();
   }
 
   // 팝업(모달)이 열려 있으면 게임 일시정지
-  function blocked() { var m = document.getElementById('modal'); return paused || (m && !m.classList.contains('hidden')); }
+  function blocked() { var m = document.getElementById('modal'); return paused || locked || (m && !m.classList.contains('hidden')); }
 
   function rnd() { return Math.floor(Math.random() * 5); }
   function reset() {
-    fruits = []; score = 0; maxLv = 0; dangerT = 0; over = false; cooldown = 0; idSeq = 0;
+    fruits = []; score = 0; maxLv = 0; dangerT = 0; over = false; cooldown = 0; idSeq = 0; locked = true;
     aimX = W / 2; cur = rnd(); next = rnd();
     onScore && onScore(score);
     drawNext();
@@ -1712,6 +1864,10 @@ var FruitGame = (function () {
       for (var gy = HOLD_Y + r; gy < H; gy += 4) ctx.fillRect(ax, gy, 1, 2);
       ctx.drawImage(sprites[cur], ax - r, HOLD_Y - r);
     }
+    if (locked && !over) {
+      ctx.fillStyle = 'rgba(26,28,44,.55)'; ctx.fillRect(0, H / 2 - 12, W, 24);
+      if (Math.floor(performance.now() / 500) % 2) { ctx.fillStyle = '#ffcd75'; ctx.font = '8px Galmuri11, monospace'; ctx.textAlign = 'center'; ctx.fillText('TAP TO START', W / 2, H / 2 + 3); }
+    }
     fruits.forEach(function (f) {
       var s = sprites[f.lv];
       if (f.pop > 0) {
@@ -1738,9 +1894,10 @@ var FruitGame = (function () {
   function stop() { running = false; cancelAnimationFrame(raf); }
 
   function pause() { paused = true; }
+  function setLocked(v) { locked = !!v; }
   function resume() { paused = false; last = 0; }
   function getScore() { return score; }
-  return { init: init, start: start, stop: stop, reset: reset, pause: pause, resume: resume, getScore: getScore, FRUITS: FRUITS };
+  return { init: init, start: start, stop: stop, reset: reset, pause: pause, resume: resume, setLocked: setLocked, isOver: function () { return over; }, getScore: getScore, FRUITS: FRUITS };
 })();
 </script>
 #################### END OF Game.html ####################
@@ -1845,6 +2002,7 @@ var FruitGame = (function () {
 
   function logout() {
     FruitGame.stop();
+    G.sid = null; G.gen = (G.gen || 0) + 1; G.queue = [];
     S.name = null; S.admin = null; S.data = null;
     $('toast').classList.add('hidden'); closeModal();
     store.set('dot_user', null);
@@ -1859,10 +2017,56 @@ var FruitGame = (function () {
     applyMonth(data);
   }
 
-  function applyMonth(data) {
+  function applyMonth(data, opts) {
+    var old = S.data;
     S.data = data; S.ym = data.ym; S.today = data.today; S.threshold = data.threshold;
-    renderToday(); renderCalendar(); renderCoupons();
+    renderToday(); renderCalendar(); renderCoupons(); renderStampChip(old);
+    if (opts && opts.notify && old && old.ym === data.ym) notifyChanges(old, data);
   }
+
+  function curWallet(d) {
+    var ym = d.today.slice(0, 7);
+    return d.wallets.filter(function (w) { return w.ym === ym; })[0] || d.wallets[0];
+  }
+  function renderStampChip(old) {
+    var w = curWallet(S.data), el = $('hdr-stamp');
+    el.textContent = w.balance;
+    if (old && curWallet(old).balance !== w.balance) { var c = el.parentNode; c.classList.remove('bump'); void c.offsetWidth; c.classList.add('bump'); }
+  }
+  /** 관리자 처리 등으로 바뀐 도장을 알려주고 해당 칸에 효과 */
+  function notifyChanges(old, d) {
+    var msgs = [];
+    Object.keys(d.records).forEach(function (k) {
+      var a = old.records[k], b = d.records[k];
+      if ((a && a.status) === b.status) return;
+      var cell = document.querySelector('.cell[data-date="' + k + '"]');
+      if (cell) cell.classList.add('fresh');
+      if (b.status === '승인') msgs.push('🎉 ' + fmtDate(k) + ' 합격 도장이 찍혔어요!');
+      else if (b.status === '비승인') msgs.push(fmtDate(k) + ' 기록이 비승인됐어요.');
+    });
+    var nc = d.coupons.filter(function (c) { return !c.used; }).length, oc = old.coupons.filter(function (c) { return !c.used; }).length;
+    if (nc > oc) msgs.push('🎟 새 쿠폰이 도착했어요!');
+    if (msgs.length) toast(msgs.length > 2 ? msgs[0] + ' 외 ' + (msgs.length - 1) + '건' : msgs.join(' / '));
+  }
+
+  /* ── 자동 갱신: 10초마다 + 화면으로 돌아왔을 때 변경 번호 확인 ── */
+  var syncing = false;
+  function syncUser() {
+    if (!S.name || !S.data || syncing || !$('scr-user').classList.contains('active')) return;
+    if (document.visibilityState && document.visibilityState !== 'visible') return;
+    syncing = true;
+    var name = S.name;
+    quiet('getUserRev', name).then(function (r) {
+      if (name !== S.name || !S.data || r.rev === S.data.rev) { syncing = false; return; }
+      return quiet('getUserMonth', name, S.ym).then(function (d) {
+        syncing = false;
+        if (name === S.name) applyMonth(d, { notify: true });
+      });
+    }).catch(function () { syncing = false; });
+  }
+  setInterval(syncUser, 10000);
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') syncUser(); });
+  window.addEventListener('focus', syncUser);
 
   function loadMonth(ym) { return call('getUserMonth', S.name, ym).then(applyMonth); }
 
@@ -2072,17 +2276,12 @@ var FruitGame = (function () {
         FruitGame.init({
           onScore: onGameScore,
           onReset: onGameReset,
-          onOver: function (score, maxLv) {
-            $('g-saved').textContent = '기록 저장 중...';
-            quiet('saveGameScore', S.name, score, maxLv).then(function (r) {
-              $('g-best').textContent = r.myBest;
-              var rank = r.top.findIndex(function (x) { return x.name === S.name; });
-              $('g-saved').textContent = '저장 완료! 최고 ' + r.myBest + '점' + (rank >= 0 ? ' · 전체 ' + (rank + 1) + '위' : '');
-            }).catch(function () { $('g-saved').textContent = '저장 실패 (네트워크 확인)'; });
-          },
+          onLockedTap: function () { showGameIntro(); },
+          onOver: onGameOver,
         });
-        quiet('getGameRanking', S.name).then(function (r) { $('g-best').textContent = r.myBest; });
+        setInterval(tickPlays, 1000);
       }
+      if (G.owner !== S.name) { G.owner = S.name; FruitGame.reset(); }
       FruitGame.start();
       processDrops();
     } else if (S.gameReady) FruitGame.stop();
@@ -2091,17 +2290,54 @@ var FruitGame = (function () {
   /* ── 미니게임 점수 보상 ── */
   var G = { sid: null, info: null, start: 2500, step: 500, next: 2500, queue: [], rolling: false, limitedShown: false };
 
+  /* 플레이 횟수 */
+  var P = { plays: null, offset: 0, fetching: false };
+  function setPlays(pl) {
+    if (!pl) return;
+    P.plays = pl; P.offset = pl.now - Date.now();
+    renderPlays();
+  }
+  function fmtLeft(ms) {
+    var t = Math.max(0, Math.ceil(ms / 1000)), m = Math.floor(t / 60), sec = t % 60;
+    return (m < 10 ? '0' : '') + m + ':' + (sec < 10 ? '0' : '') + sec;
+  }
+  function playsLeftMs() { return P.plays && P.plays.nextAt ? P.plays.nextAt - (Date.now() + P.offset) : null; }
+  function renderPlays() {
+    var pl = P.plays; if (!pl) return;
+    var h = '';
+    for (var i = 0; i < pl.max; i++) h += '<i class="hp' + (i < pl.count ? ' on' : '') + '"></i>';
+    $('g-hearts').innerHTML = h;
+    var left = playsLeftMs();
+    $('g-ptime').textContent = pl.count >= pl.max ? 'FULL' : fmtLeft(left);
+    var it = $('m-plays-left'); if (it) it.textContent = pl.count >= pl.max ? '' : '다음 충전까지 ' + fmtLeft(left);
+  }
+  function tickPlays() {
+    if (!P.plays || !$('pane-game').classList.contains('active')) return;
+    var left = playsLeftMs();
+    if (left != null && left <= 0 && !P.fetching) { P.fetching = true; refreshGameStatus().then(function () { P.fetching = false; }, function () { P.fetching = false; }); }
+    renderPlays();
+  }
+  function refreshGameStatus() {
+    return quiet('getGameStatus', S.name).then(function (r) { setPlays(r.plays); renderRecords(r.ranking); return r; });
+  }
+  function renderRecords(rk) {
+    if (!rk) return;
+    S.rank = rk;
+    $('g-today').textContent = rk.today.best ? rk.today.best.score : '-';
+    $('g-week').textContent = rk.week.best ? rk.week.best.score : '-';
+    $('g-today').parentNode.title = rk.today.best ? '오늘 최고: ' + rk.today.best.name : '';
+    $('g-week').parentNode.title = rk.week.best ? '주간 최고: ' + rk.week.best.name : '';
+  }
+
   function onGameReset() {
+    G.owner = S.name;
+    if (!S.name) return;
     G.sid = null; G.queue = []; G.rolling = false; G.limitedShown = false;
+    G.next = G.start; updateGiftBar(0);
+    $('g-score').textContent = 0;
     var gen = (G.gen = (G.gen || 0) + 1);
-    // 세션을 먼저 받은 뒤 안내 팝업 (팝업이 열려 있는 동안 게임은 자동 정지)
-    $('modal-box').className = 'px-box modal-box'; openModal('<p class="center">두근두근... <span class="dots">...</span></p>');
-    quiet('startGameSession', S.name).then(function (r) {
-      if (gen !== G.gen) return;
-      G.sid = r.sessionId; G.info = r.info; G.start = r.info.start; G.step = r.info.step; G.next = G.start;
-      updateGiftBar(FruitGame.getScore());
-      showGameIntro();
-    }).catch(function () { if (gen === G.gen) { G.next = G.start; updateGiftBar(0); showGameIntro(); } });
+    refreshGameStatus().then(function () { if (gen === G.gen && !FruitGame.isOver()) showGameIntro(); })
+      .catch(function () { if (gen === G.gen) showGameIntro(); });
   }
 
   var INTROS = [
@@ -2111,16 +2347,62 @@ var FruitGame = (function () {
     ['📻', '지지직... 수상한 무전이 들려온다...', '「...여기는 본부... {S}점 돌파 시...<br>보급품 투하 가능성 있음... 이상...」'],
   ];
   function showGameIntro() {
+    if (G.sid) return;
     var t = INTROS[Math.floor(Math.random() * INTROS.length)];
-    var st = G.start.toLocaleString();
+    var st = G.start.toLocaleString(), pl = P.plays, none = pl && pl.count <= 0;
+    var hearts = ''; if (pl) for (var i = 0; i < pl.max; i++) hearts += '<i class="hp' + (i < pl.count ? ' on' : '') + '"></i>';
     openModal(
       '<div class="intro"><div class="intro-ico"><span data-sprite="gift"></span><b class="q blink">?</b></div>' +
       '<p class="intro-a">' + t[0] + ' ' + t[1] + '</p>' +
       '<p class="intro-b">' + t[2].replace('{S}', st) + '</p>' +
-      '<p class="hint center">※ 반드시 나오는 건 아니에요. 운이 좋다면...?</p></div>' +
+      '<p class="hint center">※ 반드시 나오는 건 아니에요. 운이 좋다면...?</p>' +
+      (pl ? '<div class="intro-plays"><span class="hearts">' + hearts + '</span> 남은 플레이 <b>' + pl.count + '/' + pl.max + '</b><br><small id="m-plays-left"></small></div>' : '') +
+      (none ? '<p class="hint center">플레이 횟수를 모두 썼어요. ' + (pl.recoverMin || 30) + '분마다 1회 충전 · 매일 0시 가득 충전 · <b>최고 기록</b>을 깨면 전부 회복!</p>' : '') +
+      '</div>' +
       '<div class="actions"><button class="btn btn-dark" data-action="game-info">?</button>' +
-      '<button class="btn btn-green" data-action="close">도전한다!</button></div>',
+      '<button class="btn btn-green" data-action="game-go"' + (none ? ' disabled' : '') + '>' + (none ? '충전 중...' : '도전한다! (♥1)') + '</button></div>',
       { cls: 'intro-box' });
+    renderPlays();
+  }
+
+  function startGame() {
+    var gen = G.gen;
+    call('startGameSession', S.name).then(function (r) {
+      if (gen !== G.gen) return;
+      setPlays(r.plays);
+      if (r.noPlays) { showGameIntro(); return; }
+      G.sid = r.sessionId; G.info = r.info; G.start = r.info.start; G.step = r.info.step; G.next = G.start;
+      updateGiftBar(0);
+      closeModal();
+      FruitGame.setLocked(false);
+    });
+  }
+
+  function onGameOver(score, maxLv) {
+    $('g-saved').textContent = '기록 저장 중...';
+    $('g-over-plays').textContent = '';
+    var sid = G.sid; G.sid = null;
+    quiet('saveGameScore', S.name, score, maxLv, sid).then(function (r) {
+      setPlays(r.plays); renderRecords(r);
+      var pl = r.plays;
+      $('g-saved').textContent = '저장 완료! 이번 달 내 최고 ' + r.month.my + '점';
+      $('g-over-plays').textContent = '남은 플레이 ' + pl.count + '/' + pl.max + (pl.count < pl.max ? ' · 다음 충전 ' + fmtLeft(pl.nextAt - pl.now) : '');
+      if (r.records && r.records.length) showRecordFx(score, r.records, pl);
+    }).catch(function (e) { $('g-saved').textContent = '저장 실패: ' + ((e && e.message) || '네트워크 확인'); });
+  }
+
+  function showRecordFx(score, recs, pl) {
+    var parts = '';
+    for (var i = 0; i < 24; i++) {
+      var ang = (i / 24) * Math.PI * 2, dist = 60 + Math.random() * 70;
+      parts += '<i style="--dx:' + Math.round(Math.cos(ang) * dist) + 'px;--dy:' + Math.round(Math.sin(ang) * dist) + 'px;--d:' + (Math.random() * .2).toFixed(2) + 's"></i>';
+    }
+    openModal('<div class="fx fx-legend open rec-fx"><div class="fx-rays"></div><div class="fx-parts">' + parts + '</div><div class="fx-phase2">' +
+      '<div class="fx-grade">NEW RECORD!</div>' +
+      '<div class="fx-card"><div class="fx-name">' + recs.map(function (x) { return x + ' 최고 기록'; }).join(' + ') + ' 달성!</div>' +
+      '<div class="fx-desc">' + score.toLocaleString() + '점</div>' +
+      '<div class="intro-plays" style="margin-top:.5em"><span class="hearts">' + Array(pl.max + 1).join('<i class="hp on"></i>') + '</span> 플레이 횟수 <b>모두 회복!</b></div></div>' +
+      '<div class="actions"><button class="btn btn-green" data-action="close">좋아!</button></div></div></div>', { cls: 'fx-box' });
   }
 
   function updateGiftBar(score) {
@@ -2205,13 +2487,20 @@ var FruitGame = (function () {
     if (G.info) go(G.info); else call('startGameSession', S.name).then(function (r) { G.info = r.info; go(r.info); });
   }
 
-  function showRanking() {
+  function showRanking(tab) {
+    tab = tab || 'today';
     call('getGameRanking', S.name).then(function (r) {
-      openModal('<h3>🏆 과일 합치기 TOP 10</h3>' +
-        (r.top.length ? '<table class="tbl"><tr><th>#</th><th>이름</th><th>최고점</th></tr>' +
-          r.top.map(function (x, i) { return '<tr' + (x.name === S.name ? ' style="background:#ffcd75"' : '') + '><td>' + (i + 1) + '</td><td>' + esc(x.name) + '</td><td>' + x.score + '</td></tr>'; }).join('') + '</table>'
+      renderRecords(r);
+      var b = r[tab], label = { today: '오늘', week: '이번 주', month: '이번 달' }[tab];
+      var tabs = ['today', 'week', 'month'].map(function (k) {
+        return '<button class="stab' + (k === tab ? ' active' : '') + '" data-action="rank-tab" data-tab="' + k + '">' + { today: '오늘 최고', week: '주간 최고', month: '이번 달' }[k] + '</button>';
+      }).join('');
+      openModal('<h3>🏆 과일 합치기 순위</h3><div class="sub-tabs">' + tabs + '</div>' +
+        (b.top.length ? '<table class="tbl"><tr><th>#</th><th>이름</th><th>' + label + ' 최고점</th></tr>' +
+          b.top.map(function (x, i) { return '<tr' + (x.name === S.name ? ' style="background:#ffcd75"' : '') + '><td>' + (i === 0 ? '👑' : i + 1) + '</td><td>' + esc(x.name) + '</td><td>' + x.score + '</td></tr>'; }).join('') + '</table>'
           : '<p class="empty" style="color:var(--muted)">아직 기록이 없어요.</p>') +
-        '<p class="hint">내 최고점 ' + r.myBest + ' · 플레이 ' + r.myPlays + '회</p>' +
+        '<p class="hint">내 ' + label + ' 최고 ' + b.my + '점' + (tab === 'week' ? ' · 이번 주 ' + fmtDate(r.weekStart) + '부터' : '') + '</p>' +
+        '<p class="hint">※ 오늘·주간 최고 기록을 깨면 플레이 횟수 전부 회복! 모든 기록은 매달 1일에 초기화돼요.</p>' +
         '<div class="actions"><button class="btn btn-dark" data-action="close">닫기</button></div>');
     });
   }
@@ -2265,12 +2554,17 @@ var FruitGame = (function () {
   }
 
   function renderAdminGames(res) {
+    var tbl = function (rows) {
+      return rows.length ? '<table class="tbl"><tr><th>#</th><th>이름</th><th>최고점</th></tr>' + rows.map(function (x, i) { return '<tr><td>' + (i === 0 ? '👑' : i + 1) + '</td><td>' + esc(x.name) + '</td><td>' + x.score + '</td></tr>'; }).join('') + '</table>' : '<div class="empty">기록 없음</div>';
+    };
     $('ag-list').innerHTML =
-      '<h3 class="sec-title">🏆 최고점 순위</h3>' +
-      (res.ranking.length ? '<table class="tbl"><tr><th>#</th><th>이름</th><th>최고점</th></tr>' + res.ranking.map(function (x, i) { return '<tr><td>' + (i + 1) + '</td><td>' + esc(x.name) + '</td><td>' + x.score + '</td></tr>'; }).join('') + '</table>' : '<div class="empty">기록 없음</div>') +
+      '<h3 class="sec-title">🏆 오늘 최고 기록</h3>' + tbl(res.today || []) +
+      '<h3 class="sec-title">🏆 주간 최고 기록 <small>(' + esc(res.weekStart || '') + '~)</small></h3>' + tbl(res.week || []) +
+      '<h3 class="sec-title">🏆 이번 달 최고 기록</h3>' + tbl(res.ranking || []) +
       '<h3 class="sec-title">🕹 최근 플레이</h3>' +
       (res.list.length ? '<table class="tbl"><tr><th>일시</th><th>이름</th><th>점수</th><th>과일</th></tr>' + res.list.map(function (x) { return '<tr><td>' + esc(x.at.slice(5)) + '</td><td>' + esc(x.name) + '</td><td>' + x.score + '</td><td>' + esc((FruitGame.FRUITS[x.maxLevel] || {}).n || '-') + '</td></tr>'; }).join('') + '</table>' : '<div class="empty">기록 없음</div>');
   }
+
 
   /* ── 이벤트 위임 ── */
   document.addEventListener('click', function (e) {
@@ -2286,6 +2580,10 @@ var FruitGame = (function () {
       else if (a === 'quick') { var inp = $('m-val'); inp.value = Math.max(0, (Number(inp.value) || 0) + Number(el.getAttribute('data-n'))); judge(); }
       else if (a === 'game-restart') FruitGame.reset();
       else if (a === 'game-info') showGameInfo();
+      else if (a === 'game-go') startGame();
+      else if (a === 'rank-tab') showRanking(el.getAttribute('data-tab'));
+      else if (a === 'game-plays') showGameIntro();
+      else if (a === 'goto-stamps') { userPane('pane-coupon'); cpTab('shop'); }
       else if (a === 'grant-go') { var pg = S.pendingGrant; closeModal(); if (pg) doGrantRange(pg.name, pg.r, pg.value, pg.memo); }
       else if (a === 'game-rank') showRanking();
       else if (a === 'admin-search') adminSearch();

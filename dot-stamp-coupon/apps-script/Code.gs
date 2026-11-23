@@ -9,6 +9,7 @@
  *  - Rewards : 교환 가능한 보상 목록 (필요 도장 수 / 만근)  ← 시트에서 수정 가능
  *  - Games   : 미니게임(도트 과일 합치기) 점수
  *  - GameRewards : 미니게임 점수 보상 목록 (등급별)  ← 시트에서 수정 가능
+ *  - GamePlays : 미니게임 남은 플레이 횟수 (자동 관리)
  *  - Config  : 통과 기준 수치, 미니게임 보상 확률 등 설정값
  *
  * 버전: APP_VERSION 참고 / 변경 기록은 CHANGELOG.md
@@ -18,7 +19,7 @@
 // 독립형 스크립트라면 스프레드시트 ID를 넣으세요.
 const SPREADSHEET_ID = '';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.2.1';
 
 const SHEETS = {
   USERS:   { name: 'Users',   headers: ['이름', '가입일시', '최근접속'] },
@@ -28,6 +29,7 @@ const SHEETS = {
   REWARDS: { name: 'Rewards', headers: ['보상ID', '보상이름', '설명', '필요도장', '아이콘'] },
   GAMES:   { name: 'Games',   headers: ['일시', '이름', '점수', '최고단계'] },
   GAME_REWARDS: { name: 'GameRewards', headers: ['등급', '보상이름', '설명'] },
+  GAME_PLAYS: { name: 'GamePlays', headers: ['이름', '남은횟수', '회복기준(ms)', '날짜'] },
   CONFIG:  { name: 'Config',  headers: ['키', '값', '설명'] },
 };
 
@@ -42,6 +44,8 @@ const DEFAULT_CONFIG = [
   ['GAME_DROP_INC', 5, '미니게임: 단계마다 늘어나는 당첨 확률(%p)'],
   ['GAME_DROP_MAX', 60, '미니게임: 최대 당첨 확률(%)'],
   ['GAME_DROP_DAILY_LIMIT', 3, '미니게임: 한 사람이 하루에 받을 수 있는 보상 수 (0 = 제한 없음)'],
+  ['GAME_PLAY_MAX', 3, '미니게임: 최대 플레이 가능 횟수 (매일 0시에 가득 참)'],
+  ['GAME_PLAY_RECOVER_MIN', 30, '미니게임: 플레이 횟수 1회가 회복되는 시간(분)'],
 ];
 
 // 미니게임 점수 보상 (등급: 노멀 / 레어 / 에픽 / 레전드)
@@ -140,7 +144,13 @@ function getUserMonth(name, ym) {
     rewards: rewards_(),
     wallets: walletMonths_().map(function (m) { return wallet_(name, m); }),
     coupons: userCoupons_(name),
+    rev: getRev_(name),
   };
+}
+
+/** 사용자 데이터 변경 번호 (가벼운 확인용 · 화면 자동 갱신에 사용) */
+function getUserRev(name) {
+  return { rev: getRev_(cleanName_(name)) };
 }
 
 /* ───────────────────────── 도장 교환 (쿠폰) ───────────────────────── */
@@ -167,6 +177,7 @@ function exchangeReward(name, rewardId, ym) {
     sheet_('COUPONS').appendRow([code, name, nowStr_(), reward.id, reward.name, ym, cost, '미사용', '']);
     coupon = { code: code, rewardName: reward.name, desc: reward.desc, icon: reward.icon, ym: ym, cost: cost, balanceAfter: w.balance - cost };
   });
+  bumpRev_(name);
   const data = getUserMonth(name, ym);
   data.newCoupon = coupon;
   return data;
@@ -196,41 +207,134 @@ function saveRecord(name, date, value) {
       sh.appendRow([date, name, v, auto, STATUS.PENDING, '', '', now]);
     }
   });
+  bumpRev_(name);
   return getUserMonth(name, date.slice(0, 7));
 }
 
 /* ───────────────────────── 미니게임 ───────────────────────── */
 
-function saveGameScore(name, score, maxLevel) {
+/** 게임 결과 저장. 세션(플레이 1회 사용)이 있어야 저장됨. 오늘/주간 최고 기록을 넘으면 플레이 횟수 전부 회복 */
+function saveGameScore(name, score, maxLevel, sessionId) {
   name = cleanName_(name);
   score = Math.max(0, Math.min(1000000, Math.floor(Number(score) || 0)));
   maxLevel = Math.max(0, Math.min(20, Math.floor(Number(maxLevel) || 0)));
-  withLock_(function () { sheet_('GAMES').appendRow([nowStr_(), name, score, maxLevel]); });
-  return getGameRanking(name);
+  return withLock_(function () {
+    const cache = CacheService.getScriptCache();
+    const key = 'gs_' + String(sessionId || '');
+    const raw = cache.get(key);
+    if (!raw) throw new Error('게임 세션이 만료돼서 기록을 저장하지 못했어요.');
+    const ses = JSON.parse(raw);
+    if (ses.name !== name) throw new Error('잘못된 게임 세션이에요.');
+    if (ses.saved) throw new Error('이미 저장된 게임이에요.');
+    ses.saved = true;
+    cache.put(key, JSON.stringify(ses), 21600);
+
+    const before = getGameRanking(name);
+    sheet_('GAMES').appendRow([nowStr_(), name, score, maxLevel]);
+    const records = [];
+    if (before.today.best && score > before.today.best.score) records.push('오늘');
+    if (before.week.best && score > before.week.best.score) records.push('주간');
+    let plays;
+    if (records.length) plays = playState_(name, function (st, now, max) { st.count = max; st.ts = now; });
+    else plays = playState_(name);
+    const after = getGameRanking(name);
+    after.records = records;
+    after.plays = plays;
+    after.score = score;
+    return after;
+  });
 }
 
+/**
+ * 순위: 오늘 / 이번 주(월요일 시작, 단 이번 달 1일 이전은 제외) / 이번 달.
+ * 모든 기록은 매달 1일에 새로 시작합니다.
+ */
 function getGameRanking(name) {
-  const best = {};
-  let plays = 0;
+  const today = today_();
+  const monthStart = today.slice(0, 8) + '01';
+  const weekStart = maxStr_(mondayOf_(today), monthStart);
+  const per = { today: {}, week: {}, month: {} };
+  let myPlaysToday = 0;
   rows_('GAMES').forEach(function (r) {
+    const d = dateTime_(r[0]).slice(0, 10);
+    if (d < monthStart || d > today) return;
     const n = String(r[1]).trim();
-    const s = Number(r[2]) || 0;
-    if (name && n === name) plays++;
-    if (!(n in best) || s > best[n]) best[n] = s;
+    const sc = Number(r[2]) || 0;
+    const put = function (o) { if (!(n in o) || sc > o[n]) o[n] = sc; };
+    put(per.month);
+    if (d >= weekStart) put(per.week);
+    if (d === today) { put(per.today); if (n === name) myPlaysToday++; }
   });
-  const list = Object.keys(best).map(function (n) { return { name: n, score: best[n] }; })
-    .sort(function (a, b) { return b.score - a.score; });
-  return { top: list.slice(0, 10), myBest: name && best[name] != null ? best[name] : 0, myPlays: plays };
+  const board = function (o) {
+    const top = Object.keys(o).map(function (n) { return { name: n, score: o[n] }; }).sort(function (a, b) { return b.score - a.score; });
+    return { top: top.slice(0, 10), best: top[0] || null, my: name && o[name] != null ? o[name] : 0 };
+  };
+  const res = { today: board(per.today), week: board(per.week), month: board(per.month), weekStart: weekStart, monthStart: monthStart };
+  res.top = res.month.top;          // 이전 버전 호환
+  res.myBest = res.month.my;
+  res.myPlays = myPlaysToday;
+  return res;
 }
+
+/** 남은 플레이 횟수 + 순위 (게임 화면용) */
+function getGameStatus(name) {
+  name = cleanName_(name);
+  const plays = withLock_(function () { return playState_(name); });
+  return { plays: plays, ranking: getGameRanking(name) };
+}
+
+/**
+ * 플레이 횟수 계산 (반드시 lock 안에서 호출).
+ * - 날짜가 바뀌면(0시) 최대치로 리셋
+ * - 최대치 미만이면 회복기준 시각부터 RECOVER_MIN 분마다 1회 회복
+ * mutate(st, now, max) 로 횟수를 바꾼 뒤 시트에 저장합니다.
+ */
+function playState_(name, mutate) {
+  const cfg = config_();
+  const max = cfg.GAME_PLAY_MAX, per = cfg.GAME_PLAY_RECOVER_MIN * 60000;
+  const sh = sheet_('GAME_PLAYS');
+  const data = rows_('GAME_PLAYS');
+  const idx = data.findIndex(function (r) { return String(r[0]).trim() === name; });
+  const now = Date.now(), today = today_();
+  let st = idx >= 0 ? { count: Number(data[idx][1]), ts: Number(data[idx][2]) || now, day: date_(data[idx][3]) } : null;
+  if (!st || st.day !== today || !isFinite(st.count)) st = { count: max, ts: now, day: today };
+  if (st.count > max) st.count = max;
+  if (st.count < max) {
+    const n = Math.floor((now - st.ts) / per);
+    if (n > 0) { st.count = Math.min(max, st.count + n); st.ts = st.count >= max ? now : st.ts + n * per; }
+  }
+  if (mutate) mutate(st, now, max);
+  const row = [name, st.count, st.ts, today];
+  if (idx >= 0) sh.getRange(idx + 2, 1, 1, 4).setValues([row]);
+  else sh.appendRow(row);
+  return { count: st.count, max: max, nextAt: st.count < max ? st.ts + per : null, now: now, recoverMin: cfg.GAME_PLAY_RECOVER_MIN };
+}
+
+function mondayOf_(ymd) {
+  const p = ymd.split('-').map(Number);
+  const dow = new Date(Date.UTC(p[0], p[1] - 1, p[2])).getUTCDay();
+  return addDays_(ymd, -((dow + 6) % 7));
+}
+function maxStr_(a, b) { return a > b ? a : b; }
 
 /* ───────────────────────── 미니게임 점수 보상 ───────────────────────── */
 
 /** 게임 한 판 시작: 추첨 중복을 막기 위한 세션 발급 */
 function startGameSession(name) {
   name = cleanName_(name);
-  const id = Utilities.getUuid();
-  CacheService.getScriptCache().put('gs_' + id, JSON.stringify({ name: name, rolled: [] }), 21600);
-  return { sessionId: id, info: dropInfo_(name) };
+  return withLock_(function () {
+    let ok = false;
+    const plays = playState_(name, function (st, now, max) {
+      if (st.count <= 0) return;
+      if (st.count >= max) st.ts = now; // 가득 찬 상태에서 쓰면 그때부터 회복 시간 계산
+      st.count--;
+      ok = true;
+    });
+    if (!ok) return { noPlays: true, plays: plays, info: dropInfo_(name) };
+    const id = Utilities.getUuid();
+    CacheService.getScriptCache().put('gs_' + id, JSON.stringify({ name: name, rolled: [], saved: false }), 21600);
+    return { sessionId: id, info: dropInfo_(name), plays: plays };
+  });
 }
 
 /** threshold(2500, 3000, ...) 를 넘었을 때 한 번 추첨. 당첨되면 쿠폰 발급 */
@@ -264,6 +368,7 @@ function rollGameDrop(name, sessionId, threshold, score) {
     const reward = pool.length ? pool[Math.floor(Math.random() * pool.length)] : all[Math.floor(Math.random() * all.length)];
     const code = makeCouponCode_(cfg.COUPON_PREFIX);
     sheet_('COUPONS').appendRow([code, name, nowStr_(), 'GAME', reward.name, '게임', 0, '미사용', '', reward.grade]);
+    bumpRev_(name);
     return {
       dropped: true, threshold: threshold, chance: chance, grade: reward.grade, rewardName: reward.name, desc: reward.desc, code: code,
       remainingToday: limit > 0 ? limit - todayCount - 1 : null,
@@ -366,6 +471,7 @@ function adminReview(auth, date, name, decision) {
     const idx = data.findIndex(function (r) { return date_(r[0]) === date && String(r[1]).trim() === name; });
     if (idx < 0) throw new Error('기록을 찾을 수 없어요.');
     sh.getRange(idx + 2, 5, 1, 3).setValues([[decision, admin, nowStr_()]]);
+    bumpRev_(name);
   });
   return { ok: true };
 }
@@ -434,6 +540,7 @@ function adminGrantStampRange(auth, name, from, to, value, memo, skipWeekend) {
     });
     if (newRows.length) sh.getRange(sh.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
   });
+  bumpRev_(name);
   res.ok = true;
   res.existed = res.updated > 0;
   res.wallet = wallet_(name, to > today ? today.slice(0, 7) : to.slice(0, 7));
@@ -470,6 +577,7 @@ function adminUseCoupon(auth, code) {
     const idx = data.findIndex(function (r) { return String(r[0]) === String(code); });
     if (idx < 0) throw new Error('쿠폰을 찾을 수 없어요.');
     const used = String(data[idx][7]).trim() === '사용';
+    bumpRev_(String(data[idx][1]).trim());
     sh.getRange(idx + 2, 8, 1, 2).setValues([used ? ['미사용', ''] : ['사용', nowStr_()]]);
   });
   return adminListCoupons(auth);
@@ -480,7 +588,8 @@ function adminListGames(auth) {
   const list = rows_('GAMES').map(function (r) {
     return { at: dateTime_(r[0]), name: String(r[1]), score: Number(r[2]) || 0, maxLevel: Number(r[3]) || 0 };
   }).reverse().slice(0, 200);
-  return { list: list, ranking: getGameRanking('').top };
+  const rk = getGameRanking('');
+  return { list: list, ranking: rk.month.top, today: rk.today.top, week: rk.week.top, weekStart: rk.weekStart };
 }
 
 /* ───────────────────────── 내부 함수 ───────────────────────── */
@@ -623,6 +732,7 @@ function sheet_(key) {
     }
     if (key === 'CONFIG') sh.getRange(2, 1, DEFAULT_CONFIG.length, 3).setValues(DEFAULT_CONFIG);
     if (key === 'COUPONS') sh.getRange('F:F').setNumberFormat('@');
+    if (key === 'GAME_PLAYS') sh.getRange('D:D').setNumberFormat('@');
     if (key === 'GAME_REWARDS') sh.getRange(2, 1, DEFAULT_GAME_REWARDS.length, 3).setValues(DEFAULT_GAME_REWARDS);
     if (key === 'REWARDS') {
       sh.getRange('D:D').setNumberFormat('@');
@@ -652,14 +762,27 @@ function config_() {
   });
   o.PASS_THRESHOLD = Number(o.PASS_THRESHOLD) || 300;
   o.EXCHANGE_GRACE_DAYS = Math.max(0, Math.floor(Number(o.EXCHANGE_GRACE_DAYS) || 0));
-  ['GAME_DROP_START', 'GAME_DROP_STEP', 'GAME_DROP_BASE', 'GAME_DROP_INC', 'GAME_DROP_MAX', 'GAME_DROP_DAILY_LIMIT'].forEach(function (k) {
+  ['GAME_DROP_START', 'GAME_DROP_STEP', 'GAME_DROP_BASE', 'GAME_DROP_INC', 'GAME_DROP_MAX', 'GAME_DROP_DAILY_LIMIT', 'GAME_PLAY_MAX', 'GAME_PLAY_RECOVER_MIN'].forEach(function (k) {
     const def = DEFAULT_CONFIG.filter(function (r) { return r[0] === k; })[0][1];
     const n = Number(o[k]);
     o[k] = isFinite(n) && String(o[k]).trim() !== '' ? n : def;
   });
   o.GAME_DROP_STEP = Math.max(1, o.GAME_DROP_STEP);
+  o.GAME_PLAY_MAX = Math.max(1, Math.floor(o.GAME_PLAY_MAX));
+  o.GAME_PLAY_RECOVER_MIN = Math.max(1, o.GAME_PLAY_RECOVER_MIN);
   o.APP_TITLE = String(o.APP_TITLE || '도트 운동 도장판');
   return o;
+}
+
+/** 사용자별 변경 번호: 도장/쿠폰이 바뀔 때마다 갱신 → 화면이 감지해서 즉시 새로고침 */
+function bumpRev_(name) {
+  CacheService.getScriptCache().put('rev_' + name, String(Date.now()), 21600);
+}
+function getRev_(name) {
+  const c = CacheService.getScriptCache();
+  let v = c.get('rev_' + name);
+  if (!v) { v = String(Date.now()); c.put('rev_' + name, v, 21600); }
+  return v;
 }
 
 function withLock_(fn) {

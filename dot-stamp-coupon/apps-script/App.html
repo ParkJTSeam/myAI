@@ -94,6 +94,7 @@
 
   function logout() {
     FruitGame.stop();
+    G.sid = null; G.gen = (G.gen || 0) + 1; G.queue = [];
     S.name = null; S.admin = null; S.data = null;
     $('toast').classList.add('hidden'); closeModal();
     store.set('dot_user', null);
@@ -108,10 +109,56 @@
     applyMonth(data);
   }
 
-  function applyMonth(data) {
+  function applyMonth(data, opts) {
+    var old = S.data;
     S.data = data; S.ym = data.ym; S.today = data.today; S.threshold = data.threshold;
-    renderToday(); renderCalendar(); renderCoupons();
+    renderToday(); renderCalendar(); renderCoupons(); renderStampChip(old);
+    if (opts && opts.notify && old && old.ym === data.ym) notifyChanges(old, data);
   }
+
+  function curWallet(d) {
+    var ym = d.today.slice(0, 7);
+    return d.wallets.filter(function (w) { return w.ym === ym; })[0] || d.wallets[0];
+  }
+  function renderStampChip(old) {
+    var w = curWallet(S.data), el = $('hdr-stamp');
+    el.textContent = w.balance;
+    if (old && curWallet(old).balance !== w.balance) { var c = el.parentNode; c.classList.remove('bump'); void c.offsetWidth; c.classList.add('bump'); }
+  }
+  /** 관리자 처리 등으로 바뀐 도장을 알려주고 해당 칸에 효과 */
+  function notifyChanges(old, d) {
+    var msgs = [];
+    Object.keys(d.records).forEach(function (k) {
+      var a = old.records[k], b = d.records[k];
+      if ((a && a.status) === b.status) return;
+      var cell = document.querySelector('.cell[data-date="' + k + '"]');
+      if (cell) cell.classList.add('fresh');
+      if (b.status === '승인') msgs.push('🎉 ' + fmtDate(k) + ' 합격 도장이 찍혔어요!');
+      else if (b.status === '비승인') msgs.push(fmtDate(k) + ' 기록이 비승인됐어요.');
+    });
+    var nc = d.coupons.filter(function (c) { return !c.used; }).length, oc = old.coupons.filter(function (c) { return !c.used; }).length;
+    if (nc > oc) msgs.push('🎟 새 쿠폰이 도착했어요!');
+    if (msgs.length) toast(msgs.length > 2 ? msgs[0] + ' 외 ' + (msgs.length - 1) + '건' : msgs.join(' / '));
+  }
+
+  /* ── 자동 갱신: 10초마다 + 화면으로 돌아왔을 때 변경 번호 확인 ── */
+  var syncing = false;
+  function syncUser() {
+    if (!S.name || !S.data || syncing || !$('scr-user').classList.contains('active')) return;
+    if (document.visibilityState && document.visibilityState !== 'visible') return;
+    syncing = true;
+    var name = S.name;
+    quiet('getUserRev', name).then(function (r) {
+      if (name !== S.name || !S.data || r.rev === S.data.rev) { syncing = false; return; }
+      return quiet('getUserMonth', name, S.ym).then(function (d) {
+        syncing = false;
+        if (name === S.name) applyMonth(d, { notify: true });
+      });
+    }).catch(function () { syncing = false; });
+  }
+  setInterval(syncUser, 10000);
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') syncUser(); });
+  window.addEventListener('focus', syncUser);
 
   function loadMonth(ym) { return call('getUserMonth', S.name, ym).then(applyMonth); }
 
@@ -321,17 +368,12 @@
         FruitGame.init({
           onScore: onGameScore,
           onReset: onGameReset,
-          onOver: function (score, maxLv) {
-            $('g-saved').textContent = '기록 저장 중...';
-            quiet('saveGameScore', S.name, score, maxLv).then(function (r) {
-              $('g-best').textContent = r.myBest;
-              var rank = r.top.findIndex(function (x) { return x.name === S.name; });
-              $('g-saved').textContent = '저장 완료! 최고 ' + r.myBest + '점' + (rank >= 0 ? ' · 전체 ' + (rank + 1) + '위' : '');
-            }).catch(function () { $('g-saved').textContent = '저장 실패 (네트워크 확인)'; });
-          },
+          onLockedTap: function () { showGameIntro(); },
+          onOver: onGameOver,
         });
-        quiet('getGameRanking', S.name).then(function (r) { $('g-best').textContent = r.myBest; });
+        setInterval(tickPlays, 1000);
       }
+      if (G.owner !== S.name) { G.owner = S.name; FruitGame.reset(); }
       FruitGame.start();
       processDrops();
     } else if (S.gameReady) FruitGame.stop();
@@ -340,17 +382,54 @@
   /* ── 미니게임 점수 보상 ── */
   var G = { sid: null, info: null, start: 2500, step: 500, next: 2500, queue: [], rolling: false, limitedShown: false };
 
+  /* 플레이 횟수 */
+  var P = { plays: null, offset: 0, fetching: false };
+  function setPlays(pl) {
+    if (!pl) return;
+    P.plays = pl; P.offset = pl.now - Date.now();
+    renderPlays();
+  }
+  function fmtLeft(ms) {
+    var t = Math.max(0, Math.ceil(ms / 1000)), m = Math.floor(t / 60), sec = t % 60;
+    return (m < 10 ? '0' : '') + m + ':' + (sec < 10 ? '0' : '') + sec;
+  }
+  function playsLeftMs() { return P.plays && P.plays.nextAt ? P.plays.nextAt - (Date.now() + P.offset) : null; }
+  function renderPlays() {
+    var pl = P.plays; if (!pl) return;
+    var h = '';
+    for (var i = 0; i < pl.max; i++) h += '<i class="hp' + (i < pl.count ? ' on' : '') + '"></i>';
+    $('g-hearts').innerHTML = h;
+    var left = playsLeftMs();
+    $('g-ptime').textContent = pl.count >= pl.max ? 'FULL' : fmtLeft(left);
+    var it = $('m-plays-left'); if (it) it.textContent = pl.count >= pl.max ? '' : '다음 충전까지 ' + fmtLeft(left);
+  }
+  function tickPlays() {
+    if (!P.plays || !$('pane-game').classList.contains('active')) return;
+    var left = playsLeftMs();
+    if (left != null && left <= 0 && !P.fetching) { P.fetching = true; refreshGameStatus().then(function () { P.fetching = false; }, function () { P.fetching = false; }); }
+    renderPlays();
+  }
+  function refreshGameStatus() {
+    return quiet('getGameStatus', S.name).then(function (r) { setPlays(r.plays); renderRecords(r.ranking); return r; });
+  }
+  function renderRecords(rk) {
+    if (!rk) return;
+    S.rank = rk;
+    $('g-today').textContent = rk.today.best ? rk.today.best.score : '-';
+    $('g-week').textContent = rk.week.best ? rk.week.best.score : '-';
+    $('g-today').parentNode.title = rk.today.best ? '오늘 최고: ' + rk.today.best.name : '';
+    $('g-week').parentNode.title = rk.week.best ? '주간 최고: ' + rk.week.best.name : '';
+  }
+
   function onGameReset() {
+    G.owner = S.name;
+    if (!S.name) return;
     G.sid = null; G.queue = []; G.rolling = false; G.limitedShown = false;
+    G.next = G.start; updateGiftBar(0);
+    $('g-score').textContent = 0;
     var gen = (G.gen = (G.gen || 0) + 1);
-    // 세션을 먼저 받은 뒤 안내 팝업 (팝업이 열려 있는 동안 게임은 자동 정지)
-    $('modal-box').className = 'px-box modal-box'; openModal('<p class="center">두근두근... <span class="dots">...</span></p>');
-    quiet('startGameSession', S.name).then(function (r) {
-      if (gen !== G.gen) return;
-      G.sid = r.sessionId; G.info = r.info; G.start = r.info.start; G.step = r.info.step; G.next = G.start;
-      updateGiftBar(FruitGame.getScore());
-      showGameIntro();
-    }).catch(function () { if (gen === G.gen) { G.next = G.start; updateGiftBar(0); showGameIntro(); } });
+    refreshGameStatus().then(function () { if (gen === G.gen && !FruitGame.isOver()) showGameIntro(); })
+      .catch(function () { if (gen === G.gen) showGameIntro(); });
   }
 
   var INTROS = [
@@ -360,16 +439,62 @@
     ['📻', '지지직... 수상한 무전이 들려온다...', '「...여기는 본부... {S}점 돌파 시...<br>보급품 투하 가능성 있음... 이상...」'],
   ];
   function showGameIntro() {
+    if (G.sid) return;
     var t = INTROS[Math.floor(Math.random() * INTROS.length)];
-    var st = G.start.toLocaleString();
+    var st = G.start.toLocaleString(), pl = P.plays, none = pl && pl.count <= 0;
+    var hearts = ''; if (pl) for (var i = 0; i < pl.max; i++) hearts += '<i class="hp' + (i < pl.count ? ' on' : '') + '"></i>';
     openModal(
       '<div class="intro"><div class="intro-ico"><span data-sprite="gift"></span><b class="q blink">?</b></div>' +
       '<p class="intro-a">' + t[0] + ' ' + t[1] + '</p>' +
       '<p class="intro-b">' + t[2].replace('{S}', st) + '</p>' +
-      '<p class="hint center">※ 반드시 나오는 건 아니에요. 운이 좋다면...?</p></div>' +
+      '<p class="hint center">※ 반드시 나오는 건 아니에요. 운이 좋다면...?</p>' +
+      (pl ? '<div class="intro-plays"><span class="hearts">' + hearts + '</span> 남은 플레이 <b>' + pl.count + '/' + pl.max + '</b><br><small id="m-plays-left"></small></div>' : '') +
+      (none ? '<p class="hint center">플레이 횟수를 모두 썼어요. ' + (pl.recoverMin || 30) + '분마다 1회 충전 · 매일 0시 가득 충전 · <b>최고 기록</b>을 깨면 전부 회복!</p>' : '') +
+      '</div>' +
       '<div class="actions"><button class="btn btn-dark" data-action="game-info">?</button>' +
-      '<button class="btn btn-green" data-action="close">도전한다!</button></div>',
+      '<button class="btn btn-green" data-action="game-go"' + (none ? ' disabled' : '') + '>' + (none ? '충전 중...' : '도전한다! (♥1)') + '</button></div>',
       { cls: 'intro-box' });
+    renderPlays();
+  }
+
+  function startGame() {
+    var gen = G.gen;
+    call('startGameSession', S.name).then(function (r) {
+      if (gen !== G.gen) return;
+      setPlays(r.plays);
+      if (r.noPlays) { showGameIntro(); return; }
+      G.sid = r.sessionId; G.info = r.info; G.start = r.info.start; G.step = r.info.step; G.next = G.start;
+      updateGiftBar(0);
+      closeModal();
+      FruitGame.setLocked(false);
+    });
+  }
+
+  function onGameOver(score, maxLv) {
+    $('g-saved').textContent = '기록 저장 중...';
+    $('g-over-plays').textContent = '';
+    var sid = G.sid; G.sid = null;
+    quiet('saveGameScore', S.name, score, maxLv, sid).then(function (r) {
+      setPlays(r.plays); renderRecords(r);
+      var pl = r.plays;
+      $('g-saved').textContent = '저장 완료! 이번 달 내 최고 ' + r.month.my + '점';
+      $('g-over-plays').textContent = '남은 플레이 ' + pl.count + '/' + pl.max + (pl.count < pl.max ? ' · 다음 충전 ' + fmtLeft(pl.nextAt - pl.now) : '');
+      if (r.records && r.records.length) showRecordFx(score, r.records, pl);
+    }).catch(function (e) { $('g-saved').textContent = '저장 실패: ' + ((e && e.message) || '네트워크 확인'); });
+  }
+
+  function showRecordFx(score, recs, pl) {
+    var parts = '';
+    for (var i = 0; i < 24; i++) {
+      var ang = (i / 24) * Math.PI * 2, dist = 60 + Math.random() * 70;
+      parts += '<i style="--dx:' + Math.round(Math.cos(ang) * dist) + 'px;--dy:' + Math.round(Math.sin(ang) * dist) + 'px;--d:' + (Math.random() * .2).toFixed(2) + 's"></i>';
+    }
+    openModal('<div class="fx fx-legend open rec-fx"><div class="fx-rays"></div><div class="fx-parts">' + parts + '</div><div class="fx-phase2">' +
+      '<div class="fx-grade">NEW RECORD!</div>' +
+      '<div class="fx-card"><div class="fx-name">' + recs.map(function (x) { return x + ' 최고 기록'; }).join(' + ') + ' 달성!</div>' +
+      '<div class="fx-desc">' + score.toLocaleString() + '점</div>' +
+      '<div class="intro-plays" style="margin-top:.5em"><span class="hearts">' + Array(pl.max + 1).join('<i class="hp on"></i>') + '</span> 플레이 횟수 <b>모두 회복!</b></div></div>' +
+      '<div class="actions"><button class="btn btn-green" data-action="close">좋아!</button></div></div></div>', { cls: 'fx-box' });
   }
 
   function updateGiftBar(score) {
@@ -454,13 +579,20 @@
     if (G.info) go(G.info); else call('startGameSession', S.name).then(function (r) { G.info = r.info; go(r.info); });
   }
 
-  function showRanking() {
+  function showRanking(tab) {
+    tab = tab || 'today';
     call('getGameRanking', S.name).then(function (r) {
-      openModal('<h3>🏆 과일 합치기 TOP 10</h3>' +
-        (r.top.length ? '<table class="tbl"><tr><th>#</th><th>이름</th><th>최고점</th></tr>' +
-          r.top.map(function (x, i) { return '<tr' + (x.name === S.name ? ' style="background:#ffcd75"' : '') + '><td>' + (i + 1) + '</td><td>' + esc(x.name) + '</td><td>' + x.score + '</td></tr>'; }).join('') + '</table>'
+      renderRecords(r);
+      var b = r[tab], label = { today: '오늘', week: '이번 주', month: '이번 달' }[tab];
+      var tabs = ['today', 'week', 'month'].map(function (k) {
+        return '<button class="stab' + (k === tab ? ' active' : '') + '" data-action="rank-tab" data-tab="' + k + '">' + { today: '오늘 최고', week: '주간 최고', month: '이번 달' }[k] + '</button>';
+      }).join('');
+      openModal('<h3>🏆 과일 합치기 순위</h3><div class="sub-tabs">' + tabs + '</div>' +
+        (b.top.length ? '<table class="tbl"><tr><th>#</th><th>이름</th><th>' + label + ' 최고점</th></tr>' +
+          b.top.map(function (x, i) { return '<tr' + (x.name === S.name ? ' style="background:#ffcd75"' : '') + '><td>' + (i === 0 ? '👑' : i + 1) + '</td><td>' + esc(x.name) + '</td><td>' + x.score + '</td></tr>'; }).join('') + '</table>'
           : '<p class="empty" style="color:var(--muted)">아직 기록이 없어요.</p>') +
-        '<p class="hint">내 최고점 ' + r.myBest + ' · 플레이 ' + r.myPlays + '회</p>' +
+        '<p class="hint">내 ' + label + ' 최고 ' + b.my + '점' + (tab === 'week' ? ' · 이번 주 ' + fmtDate(r.weekStart) + '부터' : '') + '</p>' +
+        '<p class="hint">※ 오늘·주간 최고 기록을 깨면 플레이 횟수 전부 회복! 모든 기록은 매달 1일에 초기화돼요.</p>' +
         '<div class="actions"><button class="btn btn-dark" data-action="close">닫기</button></div>');
     });
   }
@@ -514,12 +646,17 @@
   }
 
   function renderAdminGames(res) {
+    var tbl = function (rows) {
+      return rows.length ? '<table class="tbl"><tr><th>#</th><th>이름</th><th>최고점</th></tr>' + rows.map(function (x, i) { return '<tr><td>' + (i === 0 ? '👑' : i + 1) + '</td><td>' + esc(x.name) + '</td><td>' + x.score + '</td></tr>'; }).join('') + '</table>' : '<div class="empty">기록 없음</div>';
+    };
     $('ag-list').innerHTML =
-      '<h3 class="sec-title">🏆 최고점 순위</h3>' +
-      (res.ranking.length ? '<table class="tbl"><tr><th>#</th><th>이름</th><th>최고점</th></tr>' + res.ranking.map(function (x, i) { return '<tr><td>' + (i + 1) + '</td><td>' + esc(x.name) + '</td><td>' + x.score + '</td></tr>'; }).join('') + '</table>' : '<div class="empty">기록 없음</div>') +
+      '<h3 class="sec-title">🏆 오늘 최고 기록</h3>' + tbl(res.today || []) +
+      '<h3 class="sec-title">🏆 주간 최고 기록 <small>(' + esc(res.weekStart || '') + '~)</small></h3>' + tbl(res.week || []) +
+      '<h3 class="sec-title">🏆 이번 달 최고 기록</h3>' + tbl(res.ranking || []) +
       '<h3 class="sec-title">🕹 최근 플레이</h3>' +
       (res.list.length ? '<table class="tbl"><tr><th>일시</th><th>이름</th><th>점수</th><th>과일</th></tr>' + res.list.map(function (x) { return '<tr><td>' + esc(x.at.slice(5)) + '</td><td>' + esc(x.name) + '</td><td>' + x.score + '</td><td>' + esc((FruitGame.FRUITS[x.maxLevel] || {}).n || '-') + '</td></tr>'; }).join('') + '</table>' : '<div class="empty">기록 없음</div>');
   }
+
 
   /* ── 이벤트 위임 ── */
   document.addEventListener('click', function (e) {
@@ -535,6 +672,10 @@
       else if (a === 'quick') { var inp = $('m-val'); inp.value = Math.max(0, (Number(inp.value) || 0) + Number(el.getAttribute('data-n'))); judge(); }
       else if (a === 'game-restart') FruitGame.reset();
       else if (a === 'game-info') showGameInfo();
+      else if (a === 'game-go') startGame();
+      else if (a === 'rank-tab') showRanking(el.getAttribute('data-tab'));
+      else if (a === 'game-plays') showGameIntro();
+      else if (a === 'goto-stamps') { userPane('pane-coupon'); cpTab('shop'); }
       else if (a === 'grant-go') { var pg = S.pendingGrant; closeModal(); if (pg) doGrantRange(pg.name, pg.r, pg.value, pg.memo); }
       else if (a === 'game-rank') showRanking();
       else if (a === 'admin-search') adminSearch();

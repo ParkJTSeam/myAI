@@ -43,6 +43,7 @@
         <header class="topbar">
           <div class="who"><span class="mini-logo" data-sprite="dumbbell"></span><b id="u-name"></b></div>
           <div class="top-actions">
+            <button class="btn btn-s btn-green chip" data-action="goto-stamps" title="이번 달 보유 도장"><span class="chip-ico" data-sprite="stamp-pass"></span><b id="hdr-stamp">0</b></button>
             <button class="btn btn-s btn-yellow" data-action="goto-coupon" title="보유 쿠폰">🎟 <b id="hdr-cp">0</b></button>
             <button class="btn btn-s btn-dark" data-action="logout">나가기</button>
           </div>
@@ -91,13 +92,15 @@
             <div class="game-hud">
               <div class="hud-cell"><small>SCORE</small><b id="g-score">0</b></div>
               <div class="hud-cell"><small>NEXT</small><canvas id="g-next" width="24" height="24"></canvas></div>
-              <div class="hud-cell"><small>BEST</small><b id="g-best">0</b></div>
-              <div class="hud-btns">
-                <button class="btn btn-s btn-dark" data-action="game-rank">순위</button>
-                <button class="btn btn-s btn-yellow" data-action="game-info" title="보상 확률">?</button>
-              </div>
+              <div class="hud-cell rec-cell"><small>오늘 최고</small><b id="g-today">-</b></div>
+              <div class="hud-cell rec-cell"><small>주간 최고</small><b id="g-week">-</b></div>
             </div>
-            <div class="gift-bar" id="g-giftbar"><span class="gift-ico" data-sprite="gift"></span><span id="g-gifttxt">???</span></div>
+            <div class="game-sub">
+              <div class="plays" id="g-plays" data-action="game-plays"><span class="hearts" id="g-hearts"></span><span class="ptime" id="g-ptime"></span></div>
+              <div class="gift-bar" id="g-giftbar"><span class="gift-ico" data-sprite="gift"></span><span id="g-gifttxt">???</span></div>
+              <button class="btn btn-s btn-dark" data-action="game-rank">순위</button>
+              <button class="btn btn-s btn-yellow" data-action="game-info" title="보상 확률">?</button>
+            </div>
             <div class="game-stage" id="g-stage">
               <canvas id="g-canvas" width="120" height="168"></canvas>
               <div class="g-over hidden" id="g-over">
@@ -105,6 +108,7 @@
                   <h2 class="blink">GAME OVER</h2>
                   <p>점수 <b id="g-final">0</b></p>
                   <p class="hint" id="g-saved">기록 저장 중...</p>
+                  <p class="hint" id="g-over-plays"></p>
                   <button class="btn btn-green" data-action="game-restart">다시 하기</button>
                 </div>
               </div>

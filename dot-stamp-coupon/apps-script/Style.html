@@ -26,12 +26,14 @@
     -webkit-font-smoothing: none; font-smooth: never;
   }
 
-  /* 화면 맞춤: 휴대폰에서는 브라우저가 내준 공간을 꽉 채우고,
-     PC·가로모드처럼 넓은 화면에서는 폭을 세로의 9/14까지만 써서 폰 모양을 유지 */
+  /* 앱 크기: 세로 14.3 : 가로 9 고정 (화면 안에 들어가는 가장 큰 크기로, 가운데 정렬) */
   #app {
-    height: 100vh; height: 100dvh;
-    width: min(100vw, calc(100vh * 9 / 14));
-    width: min(100vw, calc(100dvh * 9 / 14));
+    width: min(100vw, calc(100vh * 9 / 14.3));
+    height: min(100vh, calc(100vw * 14.3 / 9));
+    width: min(100vw, calc(100dvh * 9 / 14.3));
+    height: min(100dvh, calc(100vw * 14.3 / 9));
+    aspect-ratio: 9 / 14.3;
+    flex-shrink: 0;
     position: relative; overflow: hidden;
     container-type: size;
     background:
@@ -385,4 +387,27 @@
   .seg-btn.active { background: var(--blue); color: #fff; }
   .chk { display: flex; align-items: center; gap: .4em; font-size: .9em; color: var(--ink) !important; margin-top: .3em; }
   .chk input { width: 1.1em; height: 1.1em; margin: 0; box-shadow: none; padding: 0; }
+
+  /* ───── v1.2.1 ───── */
+  .chip { display: inline-flex; align-items: center; gap: .2em; }
+  .chip-ico { width: 1.1em; height: 1.1em; display: inline-block; }
+  .chip.bump { animation: bump .6s steps(3) 2; }
+  @keyframes bump { 50% { transform: scale(1.35); background: var(--yellow); color: var(--ink); } }
+  .cell.fresh .st .stamp { animation: stamp-in .5s steps(5) both; }
+  .cell.fresh { animation: fresh 1s steps(2) 3; }
+  @keyframes fresh { 50% { box-shadow: inset 0 0 0 3px var(--yellow); } }
+  .rec-cell small { white-space: nowrap; }
+  .game-sub { display: flex; align-items: stretch; gap: .25em; }
+  .game-sub .gift-bar { flex: 1; min-width: 0; white-space: normal; line-height: 1.15; text-align: center; word-break: keep-all; }
+  .game-sub .btn { margin: 0; padding: .2em .5em; }
+  .plays { display: flex; align-items: center; gap: .3em; background: var(--ink); color: #fff; padding: .15em .4em; box-shadow: inset 0 0 0 2px #333c57; cursor: pointer; flex-shrink: 0; font-size: .75em; }
+  .plays .ptime { color: var(--yellow); min-width: 2.8em; text-align: right; }
+  .hearts { display: inline-flex; gap: 2px; vertical-align: middle; }
+  .hp { width: .9em; height: .8em; display: inline-block; background: #3e3f55;
+    clip-path: polygon(0 20%, 20% 0, 40% 0, 50% 15%, 60% 0, 80% 0, 100% 20%, 100% 45%, 50% 100%, 0 45%); }
+  .hp.on { background: #ff4d6d; }
+  .intro-plays { text-align: center; margin: .4em 0 0; font-size: .9em; }
+  .intro-plays .hearts { font-size: 1.3em; margin-right: .3em; }
+  .intro-plays small { color: var(--muted); }
+  .rec-fx .fx-grade { font-size: 2em; }
 </style>
