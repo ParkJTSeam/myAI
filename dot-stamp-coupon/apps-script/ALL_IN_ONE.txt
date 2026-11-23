@@ -37,7 +37,7 @@ const SPREADSHEET_ID = '';
 
 const SHEETS = {
   USERS:   { name: 'Users',   headers: ['이름', '가입일시', '최근접속'] },
-  RECORDS: { name: 'Records', headers: ['날짜', '이름', '운동수치', '자동판정', '승인상태', '처리관리자', '처리일시', '입력일시'] },
+  RECORDS: { name: 'Records', headers: ['날짜', '이름', '운동수치', '자동판정', '승인상태', '처리관리자', '처리일시', '입력일시', '비고'] },
   ADMINS:  { name: 'Admins',  headers: ['관리자이름', '비밀번호', '메모'] },
   COUPONS: { name: 'Coupons', headers: ['쿠폰코드', '이름', '발급일시', '보상ID', '보상이름', '대상월', '소모도장', '사용여부', '사용일시'] },
   REWARDS: { name: 'Rewards', headers: ['보상ID', '보상이름', '설명', '필요도장', '아이콘'] },
@@ -118,8 +118,8 @@ function getUserMonth(name, ym) {
     const st = String(r[4] || STATUS.PENDING).trim();
     if (st === STATUS.APPROVED) totalApproved++;
     if (d.slice(0, 7) === ym) {
-      const v = Number(r[2]);
-      records[d] = { value: v, pass: v >= cfg.PASS_THRESHOLD, status: st };
+      const rv = recValue_(r, cfg);
+      records[d] = { value: rv.value, pass: rv.pass, status: st, granted: rv.granted, note: rv.note };
       if (st === STATUS.APPROVED) monthApproved++;
     }
   });
@@ -238,8 +238,8 @@ function adminListRecords(auth, opts) {
     if (status !== '전체' && st !== status) return;
     if (date && d !== date) return;
     if (q && n.indexOf(q) < 0) return;
-    const v = Number(r[2]);
-    list.push({ date: d, name: n, value: v, pass: v >= cfg.PASS_THRESHOLD, status: st, admin: String(r[5] || ''), reviewedAt: dateTime_(r[6]) });
+    const rv = recValue_(r, cfg);
+    list.push({ date: d, name: n, value: rv.value, pass: rv.pass, granted: rv.granted, note: rv.note, status: st, admin: String(r[5] || ''), reviewedAt: dateTime_(r[6]) });
   });
   list.sort(function (a, b) { return a.date < b.date ? 1 : a.date > b.date ? -1 : a.name.localeCompare(b.name); });
   return { list: list.slice(0, 300), total: list.length, threshold: cfg.PASS_THRESHOLD };
@@ -258,6 +258,45 @@ function adminReview(auth, date, name, decision) {
     sh.getRange(idx + 2, 5, 1, 3).setValues([[decision, admin, nowStr_()]]);
   });
   return { ok: true };
+}
+
+/** 관리자가 원하는 날짜에 합격(승인) 도장을 직접 찍어줌. 기록이 없어도 가능, 수치는 선택 */
+function adminGrantStamp(auth, name, date, value, memo) {
+  const admin = verifyAdmin_(auth);
+  name = cleanName_(name);
+  date = String(date || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('날짜를 선택하세요.');
+  if (date > today_()) throw new Error('미래 날짜에는 도장을 줄 수 없어요.');
+  const known = rows_('USERS').some(function (r) { return String(r[0]).trim() === name; });
+  if (!known) throw new Error('등록되지 않은 사용자예요. (한 번 이상 로그인한 사용자만 가능)');
+  const hasValue = value !== null && value !== undefined && String(value).trim() !== '';
+  const v = hasValue ? Number(value) : '';
+  if (hasValue && (!isFinite(v) || v < 0 || v > 100000)) throw new Error('수치는 0 ~ 100000 사이로 입력하세요.');
+  const cfg = config_();
+  const note = '관리자부여' + (String(memo || '').trim() ? ': ' + String(memo).trim().slice(0, 100) : '');
+  let existed = false;
+  withLock_(function () {
+    const sh = sheet_('RECORDS');
+    const data = rows_('RECORDS');
+    const idx = data.findIndex(function (r) { return date_(r[0]) === date && String(r[1]).trim() === name; });
+    const now = nowStr_();
+    if (idx >= 0) {
+      existed = true;
+      const row = data[idx];
+      const nv = hasValue ? v : row[2];
+      const auto = nv === '' ? '관리자부여' : (Number(nv) >= cfg.PASS_THRESHOLD ? '통과' : '미통과');
+      sh.getRange(idx + 2, 3, 1, 7).setValues([[nv, auto, STATUS.APPROVED, admin, now, row[7], note]]);
+    } else {
+      const auto = v === '' ? '관리자부여' : (v >= cfg.PASS_THRESHOLD ? '통과' : '미통과');
+      sh.appendRow([date, name, v, auto, STATUS.APPROVED, admin, now, now, note]);
+    }
+  });
+  return { ok: true, existed: existed, wallet: wallet_(name, date.slice(0, 7)) };
+}
+
+function adminListUsers(auth) {
+  verifyAdmin_(auth);
+  return rows_('USERS').map(function (r) { return String(r[0]).trim(); }).filter(String).sort();
 }
 
 function adminListCoupons(auth) {
@@ -290,6 +329,15 @@ function adminListGames(auth) {
 /* ───────────────────────── 내부 함수 ───────────────────────── */
 
 let rewardsCache_ = null;
+/** 기록 한 줄의 수치/통과 여부. 수치 없이 관리자가 부여한 도장은 통과로 표시 */
+function recValue_(r, cfg) {
+  const note = String(r[8] || '');
+  const granted = note.indexOf('관리자부여') === 0;
+  const empty = r[2] === '' || r[2] === null;
+  const v = empty ? null : Number(r[2]);
+  return { value: v, pass: empty ? granted : v >= cfg.PASS_THRESHOLD, granted: granted, note: note };
+}
+
 function rewards_() {
   if (rewardsCache_) return rewardsCache_;
   let rows = rows_('REWARDS').filter(function (r) { return String(r[0]).trim() !== ''; });
@@ -411,6 +459,9 @@ function sheet_(key) {
       sh.getRange(2, 1, DEFAULT_REWARDS.length, 5).setValues(DEFAULT_REWARDS.map(function (r) { return r.map(String); }));
     }
   }
+  // 이전 버전 시트에 새로 추가된 열 제목 채우기
+  const lastHeader = def.headers[def.headers.length - 1];
+  if (String(sh.getRange(1, def.headers.length).getValue()) !== lastHeader) sh.getRange(1, 1, 1, def.headers.length).setValues([def.headers]);
   sheetCache_[key] = sh;
   return sh;
 }
@@ -583,6 +634,7 @@ function dateTime_(v) {
         </header>
         <div class="tabs">
           <button class="tab active" data-admin-tab="rec">승인 관리</button>
+          <button class="tab" data-admin-tab="grant">도장 부여</button>
           <button class="tab" data-admin-tab="cp">쿠폰</button>
           <button class="tab" data-admin-tab="game">게임 기록</button>
         </div>
@@ -601,6 +653,23 @@ function dateTime_(v) {
             </div>
             <p class="hint" id="rec-count"></p>
             <div id="rec-list" class="rec-list"></div>
+          </div>
+          <div class="pane" id="apane-grant">
+            <form class="px-box form" id="form-grant">
+              <h3 class="grant-title"><span data-sprite="stamp-pass"></span>합격 도장 직접 찍기</h3>
+              <label>사용자</label>
+              <input id="g-user" list="g-users" placeholder="사용자 이름" autocomplete="off">
+              <datalist id="g-users"></datalist>
+              <label>날짜</label>
+              <input id="g-date" type="date">
+              <label>운동 수치 (선택 · 비우면 수치 없이 도장만)</label>
+              <input id="g-value" type="number" inputmode="numeric" min="0" max="100000" placeholder="예) 300">
+              <label>메모 (선택)</label>
+              <input id="g-memo" maxlength="100" placeholder="예) 출장으로 기록 누락">
+              <button class="btn btn-green" type="submit">★ 합격 도장 찍기</button>
+              <p class="hint">기록이 없으면 새로 만들고, 있으면 그 기록을 <b>승인</b>으로 바꿔요. 비승인 기록도 합격으로 바뀌어요.</p>
+            </form>
+            <div id="g-result"></div>
           </div>
           <div class="pane" id="apane-cp"><div id="acp-list" class="coupon-list"></div></div>
           <div class="pane" id="apane-game"><div id="ag-list"></div></div>
@@ -870,6 +939,8 @@ function dateTime_(v) {
   .rec .r-st .stamp { transform: rotate(-10deg); }
   .rec .r-btns { display: flex; flex-direction: column; }
   .rec .r-btns .btn { padding: .25em .5em; font-size: .78em; margin: 2px var(--px); }
+  .grant-title { margin: 0 0 .3em; display: flex; align-items: center; gap: .4em; font-weight: normal; font-family: 'Galmuri14','Galmuri11',monospace; }
+  .grant-title span { width: 1.8em; height: 1.8em; display: inline-block; }
   .tbl { width: calc(100% - 1em); margin: .4em .5em; border-collapse: collapse; background: var(--panel); font-size: .78em; }
   .tbl th, .tbl td { padding: .35em .3em; border-bottom: 1px solid #c8c8b4; text-align: left; }
   .tbl th { background: var(--ink); color: #fff; font-weight: normal; }
@@ -1352,7 +1423,7 @@ var FruitGame = (function () {
       var done = function () { if (--pending <= 0) { pending = 0; $('loading').classList.add('hidden'); } };
       var r = google.script.run
         .withSuccessHandler(function (res) { done(); resolve(res); })
-        .withFailureHandler(function (err) { done(); toast((err && err.message) || String(err)); reject(err); });
+        .withFailureHandler(function (err) { done(); toast((err && err.message) || String(err)); }); // 실패 시 토스트만 표시
       r[fn].apply(r, args);
     });
   }
@@ -1419,6 +1490,7 @@ var FruitGame = (function () {
   function logout() {
     FruitGame.stop();
     S.name = null; S.admin = null; S.data = null;
+    $('toast').classList.add('hidden'); closeModal();
     store.set('dot_user', null);
     show('scr-login');
   }
@@ -1452,7 +1524,7 @@ var FruitGame = (function () {
       msg = '오늘 운동 기록을 입력하세요! (' + S.threshold + ' 이상 통과)';
     } else {
       stamp = rec.status === '대기' ? '<div class="empty-box" style="font-size:1em;padding:12%">' + Sprites.get('hourglass') + '</div>' : stampHTML(rec.status);
-      val = rec.value + (rec.pass ? ' <small>통과!</small>' : ' <small>미통과</small>');
+      val = (rec.value == null ? '★' : rec.value) + (rec.granted ? ' <small>관리자 도장</small>' : rec.pass ? ' <small>통과!</small>' : ' <small>미통과</small>');
       msg = rec.status === '대기' ? '관리자 확인을 기다리는 중...' : rec.status === '승인' ? '승인 도장 획득! 🎉' : '이번엔 비승인이에요. 내일 다시!';
     }
     box.className = 'today px-box ' + cls;
@@ -1477,7 +1549,7 @@ var FruitGame = (function () {
       if (ds === S.today) cls += ' today';
       var inner = '<span class="dn">' + d + '</span>';
       if (rec) {
-        inner += '<span class="dv">' + rec.value + '</span>';
+        inner += '<span class="dv">' + (rec.value == null ? '★' : rec.value) + '</span>';
         if (rec.status === '대기') inner += '<span class="pend">' + Sprites.get('hourglass') + '</span>';
         else inner += '<span class="st">' + stampHTML(rec.status) + '</span>';
       }
@@ -1501,7 +1573,8 @@ var FruitGame = (function () {
     if (rec && rec.status !== '대기') {
       return openModal(
         '<h3>' + fmtDate(date) + '</h3><div class="center"><div class="big-stamp">' + stampHTML(rec.status) + '</div>' +
-        '<p>운동 수치 <b>' + rec.value + '</b> · ' + (rec.pass ? '통과' : '미통과') + '</p>' +
+        '<p>운동 수치 <b>' + (rec.value == null ? '-' : rec.value) + '</b> · ' + (rec.pass ? '통과' : '미통과') + '</p>' +
+        (rec.granted ? '<p class="hint">' + esc(rec.note) + '</p>' : '') +
         '<p class="hint">관리자가 <b>' + rec.status + '</b> 처리한 기록이에요.</p></div>' +
         '<div class="actions"><button class="btn btn-dark" data-action="close">닫기</button></div>');
     }
@@ -1669,6 +1742,13 @@ var FruitGame = (function () {
     document.querySelectorAll('[data-admin-tab]').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-admin-tab') === t); });
     document.querySelectorAll('#scr-admin .pane').forEach(function (p) { p.classList.toggle('active', p.id === 'apane-' + t); });
     if (t === 'rec') adminSearch();
+    if (t === 'grant') {
+      if (!$('g-date').value) $('g-date').value = S.today;
+      $('g-date').max = S.today;
+      quiet('adminListUsers', S.admin).then(function (list) {
+        $('g-users').innerHTML = list.map(function (n) { return '<option value="' + esc(n) + '">'; }).join('');
+      }).catch(function () {});
+    }
     if (t === 'cp') call('adminListCoupons', S.admin).then(renderAdminCoupons);
     if (t === 'game') call('adminListGames', S.admin).then(renderAdminGames);
   }
@@ -1681,8 +1761,9 @@ var FruitGame = (function () {
         return '<div class="rec px-box">' +
           '<div class="r-st">' + (r.status === '대기' ? Sprites.get('hourglass') : stampHTML(r.status)) + '</div>' +
           '<div class="r-main"><div class="r-name">' + esc(r.name) + '</div>' +
-          '<div class="r-date">' + fmtDate(r.date) + ' · ' + esc(r.status) + (r.admin ? ' (' + esc(r.admin) + ')' : '') + '</div></div>' +
-          '<span class="r-val ' + (r.pass ? 'pass' : 'fail') + '">' + r.value + '</span>' +
+          '<div class="r-date">' + fmtDate(r.date) + ' · ' + esc(r.status) + (r.admin ? ' (' + esc(r.admin) + ')' : '') + '</div>' +
+          (r.granted ? '<div class="r-date" style="color:var(--green-d)">★ ' + esc(r.note) + '</div>' : '') + '</div>' +
+          '<span class="r-val ' + (r.pass ? 'pass' : 'fail') + '">' + (r.value == null ? '★' : r.value) + '</span>' +
           '<div class="r-btns">' +
           '<button class="btn btn-green" data-action="review" data-d="승인" data-date="' + r.date + '" data-name="' + esc(r.name) + '"' + (r.status === '승인' ? ' disabled' : '') + '>승인</button>' +
           '<button class="btn btn-red" data-action="review" data-d="비승인" data-date="' + r.date + '" data-name="' + esc(r.name) + '"' + (r.status === '비승인' ? ' disabled' : '') + '>비승인</button>' +
@@ -1741,6 +1822,20 @@ var FruitGame = (function () {
     if (at) return adminTab(at.getAttribute('data-admin-tab'));
     if (e.target.id === 'modal') closeModal();
   });
+  $('form-grant').onsubmit = function (e) {
+    e.preventDefault();
+    var name = $('g-user').value.trim(), date = $('g-date').value, value = $('g-value').value, memo = $('g-memo').value;
+    if (!name) return toast('사용자를 입력하세요.');
+    if (!date) return toast('날짜를 선택하세요.');
+    call('adminGrantStamp', S.admin, name, date, value, memo).then(function (res) {
+      var w = res.wallet;
+      $('g-result').innerHTML = '<div class="rec px-box"><div class="r-st">' + Sprites.get('stamp-pass') + '</div>' +
+        '<div class="r-main"><div class="r-name">' + esc(name) + '</div><div class="r-date">' + fmtDate(date) + ' 합격 도장 ' + (res.existed ? '(기존 기록 승인)' : '(새 기록)') + '</div>' +
+        '<div class="r-date">' + (+w.ym.slice(5)) + '월 보유 도장 ' + w.balance + '개 · 출석 ' + w.approved + '/' + w.days + '일</div></div></div>';
+      $('g-value').value = ''; $('g-memo').value = '';
+      toast(name + ' · ' + fmtDate(date) + ' 합격 도장 완료!');
+    });
+  };
   $('f-status').onchange = adminSearch;
   $('f-date').onchange = adminSearch;
 

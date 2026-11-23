@@ -123,6 +123,7 @@
         </header>
         <div class="tabs">
           <button class="tab active" data-admin-tab="rec">승인 관리</button>
+          <button class="tab" data-admin-tab="grant">도장 부여</button>
           <button class="tab" data-admin-tab="cp">쿠폰</button>
           <button class="tab" data-admin-tab="game">게임 기록</button>
         </div>
@@ -141,6 +142,23 @@
             </div>
             <p class="hint" id="rec-count"></p>
             <div id="rec-list" class="rec-list"></div>
+          </div>
+          <div class="pane" id="apane-grant">
+            <form class="px-box form" id="form-grant">
+              <h3 class="grant-title"><span data-sprite="stamp-pass"></span>합격 도장 직접 찍기</h3>
+              <label>사용자</label>
+              <input id="g-user" list="g-users" placeholder="사용자 이름" autocomplete="off">
+              <datalist id="g-users"></datalist>
+              <label>날짜</label>
+              <input id="g-date" type="date">
+              <label>운동 수치 (선택 · 비우면 수치 없이 도장만)</label>
+              <input id="g-value" type="number" inputmode="numeric" min="0" max="100000" placeholder="예) 300">
+              <label>메모 (선택)</label>
+              <input id="g-memo" maxlength="100" placeholder="예) 출장으로 기록 누락">
+              <button class="btn btn-green" type="submit">★ 합격 도장 찍기</button>
+              <p class="hint">기록이 없으면 새로 만들고, 있으면 그 기록을 <b>승인</b>으로 바꿔요. 비승인 기록도 합격으로 바뀌어요.</p>
+            </form>
+            <div id="g-result"></div>
           </div>
           <div class="pane" id="apane-cp"><div id="acp-list" class="coupon-list"></div></div>
           <div class="pane" id="apane-game"><div id="ag-list"></div></div>

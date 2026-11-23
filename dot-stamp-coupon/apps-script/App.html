@@ -17,7 +17,7 @@
       var done = function () { if (--pending <= 0) { pending = 0; $('loading').classList.add('hidden'); } };
       var r = google.script.run
         .withSuccessHandler(function (res) { done(); resolve(res); })
-        .withFailureHandler(function (err) { done(); toast((err && err.message) || String(err)); reject(err); });
+        .withFailureHandler(function (err) { done(); toast((err && err.message) || String(err)); }); // 실패 시 토스트만 표시
       r[fn].apply(r, args);
     });
   }
@@ -84,6 +84,7 @@
   function logout() {
     FruitGame.stop();
     S.name = null; S.admin = null; S.data = null;
+    $('toast').classList.add('hidden'); closeModal();
     store.set('dot_user', null);
     show('scr-login');
   }
@@ -117,7 +118,7 @@
       msg = '오늘 운동 기록을 입력하세요! (' + S.threshold + ' 이상 통과)';
     } else {
       stamp = rec.status === '대기' ? '<div class="empty-box" style="font-size:1em;padding:12%">' + Sprites.get('hourglass') + '</div>' : stampHTML(rec.status);
-      val = rec.value + (rec.pass ? ' <small>통과!</small>' : ' <small>미통과</small>');
+      val = (rec.value == null ? '★' : rec.value) + (rec.granted ? ' <small>관리자 도장</small>' : rec.pass ? ' <small>통과!</small>' : ' <small>미통과</small>');
       msg = rec.status === '대기' ? '관리자 확인을 기다리는 중...' : rec.status === '승인' ? '승인 도장 획득! 🎉' : '이번엔 비승인이에요. 내일 다시!';
     }
     box.className = 'today px-box ' + cls;
@@ -142,7 +143,7 @@
       if (ds === S.today) cls += ' today';
       var inner = '<span class="dn">' + d + '</span>';
       if (rec) {
-        inner += '<span class="dv">' + rec.value + '</span>';
+        inner += '<span class="dv">' + (rec.value == null ? '★' : rec.value) + '</span>';
         if (rec.status === '대기') inner += '<span class="pend">' + Sprites.get('hourglass') + '</span>';
         else inner += '<span class="st">' + stampHTML(rec.status) + '</span>';
       }
@@ -166,7 +167,8 @@
     if (rec && rec.status !== '대기') {
       return openModal(
         '<h3>' + fmtDate(date) + '</h3><div class="center"><div class="big-stamp">' + stampHTML(rec.status) + '</div>' +
-        '<p>운동 수치 <b>' + rec.value + '</b> · ' + (rec.pass ? '통과' : '미통과') + '</p>' +
+        '<p>운동 수치 <b>' + (rec.value == null ? '-' : rec.value) + '</b> · ' + (rec.pass ? '통과' : '미통과') + '</p>' +
+        (rec.granted ? '<p class="hint">' + esc(rec.note) + '</p>' : '') +
         '<p class="hint">관리자가 <b>' + rec.status + '</b> 처리한 기록이에요.</p></div>' +
         '<div class="actions"><button class="btn btn-dark" data-action="close">닫기</button></div>');
     }
@@ -334,6 +336,13 @@
     document.querySelectorAll('[data-admin-tab]').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-admin-tab') === t); });
     document.querySelectorAll('#scr-admin .pane').forEach(function (p) { p.classList.toggle('active', p.id === 'apane-' + t); });
     if (t === 'rec') adminSearch();
+    if (t === 'grant') {
+      if (!$('g-date').value) $('g-date').value = S.today;
+      $('g-date').max = S.today;
+      quiet('adminListUsers', S.admin).then(function (list) {
+        $('g-users').innerHTML = list.map(function (n) { return '<option value="' + esc(n) + '">'; }).join('');
+      }).catch(function () {});
+    }
     if (t === 'cp') call('adminListCoupons', S.admin).then(renderAdminCoupons);
     if (t === 'game') call('adminListGames', S.admin).then(renderAdminGames);
   }
@@ -346,8 +355,9 @@
         return '<div class="rec px-box">' +
           '<div class="r-st">' + (r.status === '대기' ? Sprites.get('hourglass') : stampHTML(r.status)) + '</div>' +
           '<div class="r-main"><div class="r-name">' + esc(r.name) + '</div>' +
-          '<div class="r-date">' + fmtDate(r.date) + ' · ' + esc(r.status) + (r.admin ? ' (' + esc(r.admin) + ')' : '') + '</div></div>' +
-          '<span class="r-val ' + (r.pass ? 'pass' : 'fail') + '">' + r.value + '</span>' +
+          '<div class="r-date">' + fmtDate(r.date) + ' · ' + esc(r.status) + (r.admin ? ' (' + esc(r.admin) + ')' : '') + '</div>' +
+          (r.granted ? '<div class="r-date" style="color:var(--green-d)">★ ' + esc(r.note) + '</div>' : '') + '</div>' +
+          '<span class="r-val ' + (r.pass ? 'pass' : 'fail') + '">' + (r.value == null ? '★' : r.value) + '</span>' +
           '<div class="r-btns">' +
           '<button class="btn btn-green" data-action="review" data-d="승인" data-date="' + r.date + '" data-name="' + esc(r.name) + '"' + (r.status === '승인' ? ' disabled' : '') + '>승인</button>' +
           '<button class="btn btn-red" data-action="review" data-d="비승인" data-date="' + r.date + '" data-name="' + esc(r.name) + '"' + (r.status === '비승인' ? ' disabled' : '') + '>비승인</button>' +
@@ -406,6 +416,20 @@
     if (at) return adminTab(at.getAttribute('data-admin-tab'));
     if (e.target.id === 'modal') closeModal();
   });
+  $('form-grant').onsubmit = function (e) {
+    e.preventDefault();
+    var name = $('g-user').value.trim(), date = $('g-date').value, value = $('g-value').value, memo = $('g-memo').value;
+    if (!name) return toast('사용자를 입력하세요.');
+    if (!date) return toast('날짜를 선택하세요.');
+    call('adminGrantStamp', S.admin, name, date, value, memo).then(function (res) {
+      var w = res.wallet;
+      $('g-result').innerHTML = '<div class="rec px-box"><div class="r-st">' + Sprites.get('stamp-pass') + '</div>' +
+        '<div class="r-main"><div class="r-name">' + esc(name) + '</div><div class="r-date">' + fmtDate(date) + ' 합격 도장 ' + (res.existed ? '(기존 기록 승인)' : '(새 기록)') + '</div>' +
+        '<div class="r-date">' + (+w.ym.slice(5)) + '월 보유 도장 ' + w.balance + '개 · 출석 ' + w.approved + '/' + w.days + '일</div></div></div>';
+      $('g-value').value = ''; $('g-memo').value = '';
+      toast(name + ' · ' + fmtDate(date) + ' 합격 도장 완료!');
+    });
+  };
   $('f-status').onchange = adminSearch;
   $('f-date').onchange = adminSearch;
 

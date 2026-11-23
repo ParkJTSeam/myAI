@@ -17,7 +17,7 @@ const SPREADSHEET_ID = '';
 
 const SHEETS = {
   USERS:   { name: 'Users',   headers: ['이름', '가입일시', '최근접속'] },
-  RECORDS: { name: 'Records', headers: ['날짜', '이름', '운동수치', '자동판정', '승인상태', '처리관리자', '처리일시', '입력일시'] },
+  RECORDS: { name: 'Records', headers: ['날짜', '이름', '운동수치', '자동판정', '승인상태', '처리관리자', '처리일시', '입력일시', '비고'] },
   ADMINS:  { name: 'Admins',  headers: ['관리자이름', '비밀번호', '메모'] },
   COUPONS: { name: 'Coupons', headers: ['쿠폰코드', '이름', '발급일시', '보상ID', '보상이름', '대상월', '소모도장', '사용여부', '사용일시'] },
   REWARDS: { name: 'Rewards', headers: ['보상ID', '보상이름', '설명', '필요도장', '아이콘'] },
@@ -98,8 +98,8 @@ function getUserMonth(name, ym) {
     const st = String(r[4] || STATUS.PENDING).trim();
     if (st === STATUS.APPROVED) totalApproved++;
     if (d.slice(0, 7) === ym) {
-      const v = Number(r[2]);
-      records[d] = { value: v, pass: v >= cfg.PASS_THRESHOLD, status: st };
+      const rv = recValue_(r, cfg);
+      records[d] = { value: rv.value, pass: rv.pass, status: st, granted: rv.granted, note: rv.note };
       if (st === STATUS.APPROVED) monthApproved++;
     }
   });
@@ -218,8 +218,8 @@ function adminListRecords(auth, opts) {
     if (status !== '전체' && st !== status) return;
     if (date && d !== date) return;
     if (q && n.indexOf(q) < 0) return;
-    const v = Number(r[2]);
-    list.push({ date: d, name: n, value: v, pass: v >= cfg.PASS_THRESHOLD, status: st, admin: String(r[5] || ''), reviewedAt: dateTime_(r[6]) });
+    const rv = recValue_(r, cfg);
+    list.push({ date: d, name: n, value: rv.value, pass: rv.pass, granted: rv.granted, note: rv.note, status: st, admin: String(r[5] || ''), reviewedAt: dateTime_(r[6]) });
   });
   list.sort(function (a, b) { return a.date < b.date ? 1 : a.date > b.date ? -1 : a.name.localeCompare(b.name); });
   return { list: list.slice(0, 300), total: list.length, threshold: cfg.PASS_THRESHOLD };
@@ -238,6 +238,45 @@ function adminReview(auth, date, name, decision) {
     sh.getRange(idx + 2, 5, 1, 3).setValues([[decision, admin, nowStr_()]]);
   });
   return { ok: true };
+}
+
+/** 관리자가 원하는 날짜에 합격(승인) 도장을 직접 찍어줌. 기록이 없어도 가능, 수치는 선택 */
+function adminGrantStamp(auth, name, date, value, memo) {
+  const admin = verifyAdmin_(auth);
+  name = cleanName_(name);
+  date = String(date || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('날짜를 선택하세요.');
+  if (date > today_()) throw new Error('미래 날짜에는 도장을 줄 수 없어요.');
+  const known = rows_('USERS').some(function (r) { return String(r[0]).trim() === name; });
+  if (!known) throw new Error('등록되지 않은 사용자예요. (한 번 이상 로그인한 사용자만 가능)');
+  const hasValue = value !== null && value !== undefined && String(value).trim() !== '';
+  const v = hasValue ? Number(value) : '';
+  if (hasValue && (!isFinite(v) || v < 0 || v > 100000)) throw new Error('수치는 0 ~ 100000 사이로 입력하세요.');
+  const cfg = config_();
+  const note = '관리자부여' + (String(memo || '').trim() ? ': ' + String(memo).trim().slice(0, 100) : '');
+  let existed = false;
+  withLock_(function () {
+    const sh = sheet_('RECORDS');
+    const data = rows_('RECORDS');
+    const idx = data.findIndex(function (r) { return date_(r[0]) === date && String(r[1]).trim() === name; });
+    const now = nowStr_();
+    if (idx >= 0) {
+      existed = true;
+      const row = data[idx];
+      const nv = hasValue ? v : row[2];
+      const auto = nv === '' ? '관리자부여' : (Number(nv) >= cfg.PASS_THRESHOLD ? '통과' : '미통과');
+      sh.getRange(idx + 2, 3, 1, 7).setValues([[nv, auto, STATUS.APPROVED, admin, now, row[7], note]]);
+    } else {
+      const auto = v === '' ? '관리자부여' : (v >= cfg.PASS_THRESHOLD ? '통과' : '미통과');
+      sh.appendRow([date, name, v, auto, STATUS.APPROVED, admin, now, now, note]);
+    }
+  });
+  return { ok: true, existed: existed, wallet: wallet_(name, date.slice(0, 7)) };
+}
+
+function adminListUsers(auth) {
+  verifyAdmin_(auth);
+  return rows_('USERS').map(function (r) { return String(r[0]).trim(); }).filter(String).sort();
 }
 
 function adminListCoupons(auth) {
@@ -270,6 +309,15 @@ function adminListGames(auth) {
 /* ───────────────────────── 내부 함수 ───────────────────────── */
 
 let rewardsCache_ = null;
+/** 기록 한 줄의 수치/통과 여부. 수치 없이 관리자가 부여한 도장은 통과로 표시 */
+function recValue_(r, cfg) {
+  const note = String(r[8] || '');
+  const granted = note.indexOf('관리자부여') === 0;
+  const empty = r[2] === '' || r[2] === null;
+  const v = empty ? null : Number(r[2]);
+  return { value: v, pass: empty ? granted : v >= cfg.PASS_THRESHOLD, granted: granted, note: note };
+}
+
 function rewards_() {
   if (rewardsCache_) return rewardsCache_;
   let rows = rows_('REWARDS').filter(function (r) { return String(r[0]).trim() !== ''; });
@@ -391,6 +439,9 @@ function sheet_(key) {
       sh.getRange(2, 1, DEFAULT_REWARDS.length, 5).setValues(DEFAULT_REWARDS.map(function (r) { return r.map(String); }));
     }
   }
+  // 이전 버전 시트에 새로 추가된 열 제목 채우기
+  const lastHeader = def.headers[def.headers.length - 1];
+  if (String(sh.getRange(1, def.headers.length).getValue()) !== lastHeader) sh.getRange(1, 1, 1, def.headers.length).setValues([def.headers]);
   sheetCache_[key] = sh;
   return sh;
 }
