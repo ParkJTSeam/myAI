@@ -3,7 +3,7 @@
 도트(픽셀) 스타일의 운동 기록 + 관리자 승인 도장 + 쿠폰 자동 발급 + 미니게임 웹앱입니다.
 화면은 스마트폰 세로 비율 **10:16** 으로 고정됩니다.
 
-![screenshot](screenshot.png)
+![screenshot](docs/screenshot.png)
 
 ## 기능
 | 구분 | 내용 |
@@ -27,15 +27,15 @@
 - 월말 승인이 늦어질 수 있어서, 지난달 도장은 다음 달 **7일까지** 교환할 수 있습니다. (`Config`의 `EXCHANGE_GRACE_DAYS`)
 - 쿠폰함 메뉴: **보유 쿠폰 / 도장 교환 / 사용 완료** 탭. 관리자는 쿠폰 탭에서 `사용처리` 합니다.
 
-![coupon](screenshot-coupon.png)
+![coupon](docs/screenshot-coupon.png)
 
 ## 설치 방법
 1. 구글 스프레드시트를 새로 만들고 **확장 프로그램 → Apps Script** 를 엽니다.
-2. 아래 파일을 같은 이름으로 만들어 내용을 붙여넣습니다. (HTML 파일은 `+ → HTML`, 이름에 `.html` 은 빼고 입력)
+2. [`apps-script/`](apps-script/) 폴더의 파일을 같은 이름으로 만들어 내용을 붙여넣습니다. (한 번에 복사: [`apps-script/ALL_IN_ONE.txt`](apps-script/ALL_IN_ONE.txt), 압축 파일: `dot-stamp-coupon-apps-script.zip`) (HTML 파일은 `+ → HTML`, 이름에 `.html` 은 빼고 입력)
    - `Code.gs`
    - `Index`, `Style`, `Sprites`, `Game`, `App` (HTML)
    - (선택) 프로젝트 설정에서 "appsscript.json 표시" 후 `appsscript.json` 붙여넣기 → 시간대 `Asia/Seoul`
-3. 편집기에서 `setup` 함수를 한 번 실행해 권한을 승인합니다. (시트 6개가 자동 생성됩니다)
+3. 편집기에서 `setup` 함수를 한 번 실행해 권한을 승인합니다. (시트 7개가 자동 생성됩니다)
 4. **배포 → 새 배포 → 웹 앱**
    - 실행 사용자: **나**
    - 액세스 권한: **모든 사용자** (또는 조직 내 사용자)
