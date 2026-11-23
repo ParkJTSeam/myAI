@@ -28,20 +28,26 @@ HTML 파일은 이름 입력 시 ".html" 을 빼고 입력 (예: Index)
  *  - Coupons : 도장을 소모해 교환한 쿠폰
  *  - Rewards : 교환 가능한 보상 목록 (필요 도장 수 / 만근)  ← 시트에서 수정 가능
  *  - Games   : 미니게임(도트 과일 합치기) 점수
- *  - Config  : 통과 기준 수치, 쿠폰 발급 기준 등 설정값
+ *  - GameRewards : 미니게임 점수 보상 목록 (등급별)  ← 시트에서 수정 가능
+ *  - Config  : 통과 기준 수치, 미니게임 보상 확률 등 설정값
+ *
+ * 버전: APP_VERSION 참고 / 변경 기록은 CHANGELOG.md
  */
 
 // 비워두면 이 스크립트가 연결된(컨테이너 바인딩) 스프레드시트를 사용합니다.
 // 독립형 스크립트라면 스프레드시트 ID를 넣으세요.
 const SPREADSHEET_ID = '';
 
+const APP_VERSION = '1.2.0';
+
 const SHEETS = {
   USERS:   { name: 'Users',   headers: ['이름', '가입일시', '최근접속'] },
   RECORDS: { name: 'Records', headers: ['날짜', '이름', '운동수치', '자동판정', '승인상태', '처리관리자', '처리일시', '입력일시', '비고'] },
   ADMINS:  { name: 'Admins',  headers: ['관리자이름', '비밀번호', '메모'] },
-  COUPONS: { name: 'Coupons', headers: ['쿠폰코드', '이름', '발급일시', '보상ID', '보상이름', '대상월', '소모도장', '사용여부', '사용일시'] },
+  COUPONS: { name: 'Coupons', headers: ['쿠폰코드', '이름', '발급일시', '보상ID', '보상이름', '대상월', '소모도장', '사용여부', '사용일시', '등급'] },
   REWARDS: { name: 'Rewards', headers: ['보상ID', '보상이름', '설명', '필요도장', '아이콘'] },
   GAMES:   { name: 'Games',   headers: ['일시', '이름', '점수', '최고단계'] },
+  GAME_REWARDS: { name: 'GameRewards', headers: ['등급', '보상이름', '설명'] },
   CONFIG:  { name: 'Config',  headers: ['키', '값', '설명'] },
 };
 
@@ -50,6 +56,28 @@ const DEFAULT_CONFIG = [
   ['PASS_THRESHOLD', 300, '이 값 이상이면 통과(초록), 미만이면 미통과(빨강)'],
   ['EXCHANGE_GRACE_DAYS', 7, '지난달 도장을 다음 달 며칠까지 교환할 수 있는지 (월말 승인 지연 대비)'],
   ['COUPON_PREFIX', 'FIT', '쿠폰 코드 앞글자'],
+  ['GAME_DROP_START', 2500, '미니게임: 이 점수를 넘으면 보상 추첨 시작'],
+  ['GAME_DROP_STEP', 500, '미니게임: 이 점수만큼 더 오를 때마다 한 번 더 추첨 + 확률 상승'],
+  ['GAME_DROP_BASE', 15, '미니게임: 시작 점수 돌파 시 당첨 확률(%)'],
+  ['GAME_DROP_INC', 5, '미니게임: 단계마다 늘어나는 당첨 확률(%p)'],
+  ['GAME_DROP_MAX', 60, '미니게임: 최대 당첨 확률(%)'],
+  ['GAME_DROP_DAILY_LIMIT', 3, '미니게임: 한 사람이 하루에 받을 수 있는 보상 수 (0 = 제한 없음)'],
+];
+
+// 미니게임 점수 보상 (등급: 노멀 / 레어 / 에픽 / 레전드)
+const GRADES = ['노멀', '레어', '에픽', '레전드'];
+const DEFAULT_GAME_REWARDS = [
+  ['노멀', '커피 쿠폰 (1,500원)', '1,500원 이하 커피 1잔'],
+  ['노멀', '뽀뽀 1회권', '뽀뽀 1회'],
+  ['노멀', '심부름 1회권', '심부름 1회'],
+  ['레어', '커피 쿠폰 (5,000원)', '5,000원 이하 커피 1잔'],
+  ['레어', '빨래 1회권', '빨래 1회 대신 해주기'],
+  ['레어', '귀 후벼주기 1분권', '귀 청소 1분'],
+  ['에픽', '자동차 1회 이용권', '자동차 1회 이용'],
+  ['에픽', '귀 후벼주기 3분권', '귀 청소 3분'],
+  ['에픽', '안마 3분권', '안마 3분'],
+  ['레전드', '근처 여행 1회권', '근처로 여행 1회'],
+  ['레전드', '안마 5분권', '안마 5분'],
 ];
 
 // 필요도장: 숫자 = 그달 도장 N개 소모 / '만근' = 그달 모든 날짜 승인 시 (도장 소모 없음, 월 1회)
@@ -68,6 +96,7 @@ function doGet() {
   ensureSheets_();
   const tpl = HtmlService.createTemplateFromFile('Index');
   tpl.appTitle = config_().APP_TITLE;
+  tpl.appVersion = APP_VERSION;
   return tpl.evaluate()
     .setTitle(config_().APP_TITLE)
     .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no')
@@ -87,7 +116,7 @@ function setup() {
 
 function getBootstrap() {
   const cfg = config_();
-  return { title: cfg.APP_TITLE, threshold: cfg.PASS_THRESHOLD, today: today_() };
+  return { title: cfg.APP_TITLE, threshold: cfg.PASS_THRESHOLD, today: today_(), version: APP_VERSION };
 }
 
 /* ───────────────────────── 사용자 ───────────────────────── */
@@ -214,6 +243,107 @@ function getGameRanking(name) {
   return { top: list.slice(0, 10), myBest: name && best[name] != null ? best[name] : 0, myPlays: plays };
 }
 
+/* ───────────────────────── 미니게임 점수 보상 ───────────────────────── */
+
+/** 게임 한 판 시작: 추첨 중복을 막기 위한 세션 발급 */
+function startGameSession(name) {
+  name = cleanName_(name);
+  const id = Utilities.getUuid();
+  CacheService.getScriptCache().put('gs_' + id, JSON.stringify({ name: name, rolled: [] }), 21600);
+  return { sessionId: id, info: dropInfo_(name) };
+}
+
+/** threshold(2500, 3000, ...) 를 넘었을 때 한 번 추첨. 당첨되면 쿠폰 발급 */
+function rollGameDrop(name, sessionId, threshold, score) {
+  name = cleanName_(name);
+  const cfg = config_();
+  threshold = Number(threshold); score = Number(score);
+  const start = cfg.GAME_DROP_START, step = cfg.GAME_DROP_STEP;
+  if (!(threshold >= start) || (threshold - start) % step !== 0 || !(score >= threshold)) throw new Error('잘못된 추첨 요청이에요.');
+  return withLock_(function () {
+    const cache = CacheService.getScriptCache();
+    const key = 'gs_' + String(sessionId);
+    const raw = cache.get(key);
+    if (!raw) throw new Error('게임 세션이 만료됐어요. 새 게임을 시작하세요.');
+    const ses = JSON.parse(raw);
+    if (ses.name !== name) throw new Error('잘못된 게임 세션이에요.');
+    if (ses.rolled.indexOf(threshold) >= 0) return { dropped: false, duplicate: true, threshold: threshold };
+    ses.rolled.push(threshold);
+    cache.put(key, JSON.stringify(ses), 21600);
+
+    const k = (threshold - start) / step;
+    const chance = dropChance_(cfg, k);
+    const todayCount = gameDropsToday_(name);
+    const limit = cfg.GAME_DROP_DAILY_LIMIT;
+    if (limit > 0 && todayCount >= limit) return { dropped: false, limited: true, threshold: threshold, chance: chance, limit: limit };
+    if (Math.random() * 100 >= chance) return { dropped: false, threshold: threshold, chance: chance };
+
+    const grade = pickGrade_(k);
+    const pool = gameRewards_().filter(function (r) { return r.grade === grade; });
+    const all = gameRewards_();
+    const reward = pool.length ? pool[Math.floor(Math.random() * pool.length)] : all[Math.floor(Math.random() * all.length)];
+    const code = makeCouponCode_(cfg.COUPON_PREFIX);
+    sheet_('COUPONS').appendRow([code, name, nowStr_(), 'GAME', reward.name, '게임', 0, '미사용', '', reward.grade]);
+    return {
+      dropped: true, threshold: threshold, chance: chance, grade: reward.grade, rewardName: reward.name, desc: reward.desc, code: code,
+      remainingToday: limit > 0 ? limit - todayCount - 1 : null,
+    };
+  });
+}
+
+function dropChance_(cfg, k) { return Math.min(cfg.GAME_DROP_MAX, cfg.GAME_DROP_BASE + cfg.GAME_DROP_INC * k); }
+
+/** 단계(k)가 높을수록 높은 등급 비중 증가 */
+function gradeWeights_(k) {
+  return { '노멀': Math.max(30, 70 - 6 * k), '레어': 22 + 2 * k, '에픽': 7 + 2.5 * k, '레전드': 1 + 1.5 * k };
+}
+function pickGrade_(k) {
+  const w = gradeWeights_(k);
+  let total = 0; GRADES.forEach(function (g) { total += w[g]; });
+  let x = Math.random() * total;
+  for (let i = 0; i < GRADES.length; i++) { x -= w[GRADES[i]]; if (x < 0) return GRADES[i]; }
+  return GRADES[0];
+}
+
+function gameDropsToday_(name) {
+  const t = today_();
+  return rows_('COUPONS').filter(function (r) {
+    return String(r[1]).trim() === name && String(r[3]) === 'GAME' && dateTime_(r[2]).slice(0, 10) === t;
+  }).length;
+}
+
+/** 확률표 (화면 안내용) */
+function dropInfo_(name) {
+  const cfg = config_();
+  const rows = [];
+  for (let k = 0; k < 8; k++) {
+    const w = gradeWeights_(k);
+    let total = 0; GRADES.forEach(function (g) { total += w[g]; });
+    const chance = dropChance_(cfg, k);
+    const g = {};
+    GRADES.forEach(function (x) { g[x] = Math.round(chance * w[x] / total * 10) / 10; });
+    rows.push({ score: cfg.GAME_DROP_START + cfg.GAME_DROP_STEP * k, chance: chance, grades: g });
+  }
+  const limit = cfg.GAME_DROP_DAILY_LIMIT;
+  return {
+    start: cfg.GAME_DROP_START, step: cfg.GAME_DROP_STEP, table: rows, limit: limit,
+    remainingToday: name && limit > 0 ? Math.max(0, limit - gameDropsToday_(name)) : null,
+    rewards: gameRewards_(),
+  };
+}
+
+let gameRewardsCache_ = null;
+function gameRewards_() {
+  if (gameRewardsCache_) return gameRewardsCache_;
+  let rows = rows_('GAME_REWARDS').filter(function (r) { return String(r[1]).trim() !== ''; });
+  if (!rows.length) rows = DEFAULT_GAME_REWARDS;
+  gameRewardsCache_ = rows.map(function (r) {
+    const g = String(r[0]).trim();
+    return { grade: GRADES.indexOf(g) >= 0 ? g : '노멀', name: String(r[1]).trim(), desc: String(r[2] || '') };
+  });
+  return gameRewardsCache_;
+}
+
 /* ───────────────────────── 관리자 ───────────────────────── */
 
 function adminLogin(auth) {
@@ -262,11 +392,35 @@ function adminReview(auth, date, name, decision) {
 
 /** 관리자가 원하는 날짜에 합격(승인) 도장을 직접 찍어줌. 기록이 없어도 가능, 수치는 선택 */
 function adminGrantStamp(auth, name, date, value, memo) {
+  return adminGrantStampRange(auth, name, date, date, value, memo, false);
+}
+
+/**
+ * 기간 일괄 합격 도장. from~to (포함) 각 날짜에 승인 도장을 찍음.
+ * - 기록 없음 → 새로 생성 / 대기·비승인 → 승인으로 변경
+ * - 이미 승인된 날은 기간 부여일 때 건너뜀 (하루 부여일 때는 수치·메모 갱신)
+ * - skipWeekend: 토·일 제외 / 오늘 이후 날짜는 자동 제외 / 최대 93일
+ */
+function adminGrantStampRange(auth, name, from, to, value, memo, skipWeekend) {
   const admin = verifyAdmin_(auth);
   name = cleanName_(name);
-  date = String(date || '');
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('날짜를 선택하세요.');
-  if (date > today_()) throw new Error('미래 날짜에는 도장을 줄 수 없어요.');
+  from = String(from || ''); to = String(to || from);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) throw new Error('날짜를 선택하세요.');
+  if (from > to) { const t = from; from = to; to = t; }
+  const today = today_();
+  if (from > today) throw new Error('미래 날짜에는 도장을 줄 수 없어요.');
+  let future = 0;
+  const dates = [];
+  for (let d = from; d <= to; d = addDays_(d, 1)) {
+    if (d > today) { future++; continue; }
+    if (skipWeekend && isWeekend_(d)) continue;
+    dates.push(d);
+    if (dates.length > 93) throw new Error('한 번에 최대 93일까지 부여할 수 있어요.');
+  }
+  const total = (function () { let n = 0; for (let d = from; d <= to; d = addDays_(d, 1)) n++; return n; })();
+  const weekend = total - future - dates.length;
+  if (!dates.length) throw new Error('부여할 날짜가 없어요. (주말 제외/미래 날짜 확인)');
+
   const known = rows_('USERS').some(function (r) { return String(r[0]).trim() === name; });
   if (!known) throw new Error('등록되지 않은 사용자예요. (한 번 이상 로그인한 사용자만 가능)');
   const hasValue = value !== null && value !== undefined && String(value).trim() !== '';
@@ -274,24 +428,47 @@ function adminGrantStamp(auth, name, date, value, memo) {
   if (hasValue && (!isFinite(v) || v < 0 || v > 100000)) throw new Error('수치는 0 ~ 100000 사이로 입력하세요.');
   const cfg = config_();
   const note = '관리자부여' + (String(memo || '').trim() ? ': ' + String(memo).trim().slice(0, 100) : '');
-  let existed = false;
+  const single = from === to;
+  const autoOf = function (val) { return val === '' ? '관리자부여' : (Number(val) >= cfg.PASS_THRESHOLD ? '통과' : '미통과'); };
+  const res = { created: 0, updated: 0, already: 0, weekend: weekend, future: future, days: dates.length };
+
   withLock_(function () {
     const sh = sheet_('RECORDS');
     const data = rows_('RECORDS');
-    const idx = data.findIndex(function (r) { return date_(r[0]) === date && String(r[1]).trim() === name; });
+    const index = {};
+    data.forEach(function (r, i) { if (String(r[1]).trim() === name) index[date_(r[0])] = i; });
     const now = nowStr_();
-    if (idx >= 0) {
-      existed = true;
-      const row = data[idx];
+    const newRows = [];
+    dates.forEach(function (d) {
+      const i = index[d];
+      if (i === undefined) {
+        newRows.push([d, name, v, autoOf(v), STATUS.APPROVED, admin, now, now, note]);
+        res.created++;
+        return;
+      }
+      const row = data[i];
+      if (String(row[4]).trim() === STATUS.APPROVED && !single) { res.already++; return; }
       const nv = hasValue ? v : row[2];
-      const auto = nv === '' ? '관리자부여' : (Number(nv) >= cfg.PASS_THRESHOLD ? '통과' : '미통과');
-      sh.getRange(idx + 2, 3, 1, 7).setValues([[nv, auto, STATUS.APPROVED, admin, now, row[7], note]]);
-    } else {
-      const auto = v === '' ? '관리자부여' : (v >= cfg.PASS_THRESHOLD ? '통과' : '미통과');
-      sh.appendRow([date, name, v, auto, STATUS.APPROVED, admin, now, now, note]);
-    }
+      sh.getRange(i + 2, 3, 1, 7).setValues([[nv, autoOf(nv), STATUS.APPROVED, admin, now, row[7], note]]);
+      res.updated++;
+    });
+    if (newRows.length) sh.getRange(sh.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
   });
-  return { ok: true, existed: existed, wallet: wallet_(name, date.slice(0, 7)) };
+  res.ok = true;
+  res.existed = res.updated > 0;
+  res.wallet = wallet_(name, to > today ? today.slice(0, 7) : to.slice(0, 7));
+  return res;
+}
+
+function addDays_(ymd, n) {
+  const p = ymd.split('-').map(Number);
+  const d = new Date(Date.UTC(p[0], p[1] - 1, p[2] + n));
+  return d.getUTCFullYear() + '-' + ('0' + (d.getUTCMonth() + 1)).slice(-2) + '-' + ('0' + d.getUTCDate()).slice(-2);
+}
+function isWeekend_(ymd) {
+  const p = ymd.split('-').map(Number);
+  const w = new Date(Date.UTC(p[0], p[1] - 1, p[2])).getUTCDay();
+  return w === 0 || w === 6;
 }
 
 function adminListUsers(auth) {
@@ -383,11 +560,15 @@ function userCoupons_(name) {
 }
 
 function couponObj_(r) {
-  const rw = rewards_().filter(function (x) { return x.id === String(r[3]); })[0] || {};
+  const isGame = String(r[3]) === 'GAME';
+  let rw;
+  if (isGame) rw = gameRewards_().filter(function (x) { return x.name === String(r[4]); })[0] || {};
+  else rw = rewards_().filter(function (x) { return x.id === String(r[3]); })[0] || {};
   return {
     code: String(r[0]), name: String(r[1]), issuedAt: dateTime_(r[2]), rewardId: String(r[3]), rewardName: String(r[4]),
-    desc: rw.desc || '', icon: rw.icon || 'ticket', ym: month_(r[5]), cost: Number(r[6]) || 0,
+    desc: rw.desc || '', icon: isGame ? 'gift' : (rw.icon || 'ticket'), ym: isGame ? '' : month_(r[5]), cost: Number(r[6]) || 0,
     used: String(r[7]).trim() === '사용', usedAt: dateTime_(r[8]),
+    game: isGame, grade: isGame ? String(r[9] || '노멀') : '',
   };
 }
 
@@ -434,6 +615,14 @@ function ss_() {
 
 function ensureSheets_() {
   Object.keys(SHEETS).forEach(function (k) { sheet_(k); });
+  // 새 버전에서 추가된 설정 키를 기존 Config 시트에 채워 넣기
+  const have = {};
+  rows_('CONFIG').forEach(function (r) { have[String(r[0]).trim()] = true; });
+  const missing = DEFAULT_CONFIG.filter(function (r) { return !have[r[0]]; });
+  if (missing.length) {
+    const sh = sheet_('CONFIG');
+    sh.getRange(sh.getLastRow() + 1, 1, missing.length, 3).setValues(missing);
+  }
 }
 
 const sheetCache_ = {};
@@ -454,6 +643,7 @@ function sheet_(key) {
     }
     if (key === 'CONFIG') sh.getRange(2, 1, DEFAULT_CONFIG.length, 3).setValues(DEFAULT_CONFIG);
     if (key === 'COUPONS') sh.getRange('F:F').setNumberFormat('@');
+    if (key === 'GAME_REWARDS') sh.getRange(2, 1, DEFAULT_GAME_REWARDS.length, 3).setValues(DEFAULT_GAME_REWARDS);
     if (key === 'REWARDS') {
       sh.getRange('D:D').setNumberFormat('@');
       sh.getRange(2, 1, DEFAULT_REWARDS.length, 5).setValues(DEFAULT_REWARDS.map(function (r) { return r.map(String); }));
@@ -482,6 +672,12 @@ function config_() {
   });
   o.PASS_THRESHOLD = Number(o.PASS_THRESHOLD) || 300;
   o.EXCHANGE_GRACE_DAYS = Math.max(0, Math.floor(Number(o.EXCHANGE_GRACE_DAYS) || 0));
+  ['GAME_DROP_START', 'GAME_DROP_STEP', 'GAME_DROP_BASE', 'GAME_DROP_INC', 'GAME_DROP_MAX', 'GAME_DROP_DAILY_LIMIT'].forEach(function (k) {
+    const def = DEFAULT_CONFIG.filter(function (r) { return r[0] === k; })[0][1];
+    const n = Number(o[k]);
+    o[k] = isFinite(n) && String(o[k]).trim() !== '' ? n : def;
+  });
+  o.GAME_DROP_STEP = Math.max(1, o.GAME_DROP_STEP);
   o.APP_TITLE = String(o.APP_TITLE || '도트 운동 도장판');
   return o;
 }
@@ -546,6 +742,7 @@ function dateTime_(v) {
           <button class="btn btn-blue" type="submit">▶ 관리자 로그인</button>
         </form>
         <p class="foot">PRESS START · <span id="boot-th">300</span> 이상이면 통과!</p>
+        <p class="ver">v<?= appVersion ?></p>
       </section>
 
       <!-- ───── 사용자 메인 ───── -->
@@ -602,8 +799,12 @@ function dateTime_(v) {
               <div class="hud-cell"><small>SCORE</small><b id="g-score">0</b></div>
               <div class="hud-cell"><small>NEXT</small><canvas id="g-next" width="24" height="24"></canvas></div>
               <div class="hud-cell"><small>BEST</small><b id="g-best">0</b></div>
-              <button class="btn btn-s btn-dark" data-action="game-rank">순위</button>
+              <div class="hud-btns">
+                <button class="btn btn-s btn-dark" data-action="game-rank">순위</button>
+                <button class="btn btn-s btn-yellow" data-action="game-info" title="보상 확률">?</button>
+              </div>
             </div>
+            <div class="gift-bar" id="g-giftbar"><span class="gift-ico" data-sprite="gift"></span><span id="g-gifttxt">???</span></div>
             <div class="game-stage" id="g-stage">
               <canvas id="g-canvas" width="120" height="168"></canvas>
               <div class="g-over hidden" id="g-over">
@@ -660,14 +861,25 @@ function dateTime_(v) {
               <label>사용자</label>
               <input id="g-user" list="g-users" placeholder="사용자 이름" autocomplete="off">
               <datalist id="g-users"></datalist>
-              <label>날짜</label>
+              <label>부여 방식</label>
+              <div class="seg">
+                <button type="button" class="seg-btn active" data-grant-mode="day">하루</button>
+                <button type="button" class="seg-btn" data-grant-mode="range">기간 일괄</button>
+              </div>
+              <label id="g-date-label">날짜</label>
               <input id="g-date" type="date">
+              <div id="g-range-box" class="hidden">
+                <label>종료일</label>
+                <input id="g-date2" type="date">
+                <label class="chk"><input type="checkbox" id="g-skipwk"> 토·일 제외</label>
+                <p class="hint" id="g-range-info"></p>
+              </div>
               <label>운동 수치 (선택 · 비우면 수치 없이 도장만)</label>
               <input id="g-value" type="number" inputmode="numeric" min="0" max="100000" placeholder="예) 300">
               <label>메모 (선택)</label>
               <input id="g-memo" maxlength="100" placeholder="예) 출장으로 기록 누락">
               <button class="btn btn-green" type="submit">★ 합격 도장 찍기</button>
-              <p class="hint">기록이 없으면 새로 만들고, 있으면 그 기록을 <b>승인</b>으로 바꿔요. 비승인 기록도 합격으로 바뀌어요.</p>
+              <p class="hint">기록이 없으면 새로 만들고, 있으면 그 기록을 <b>승인</b>으로 바꿔요. 비승인 기록도 합격으로 바뀌어요. 기간 일괄일 때 이미 승인된 날은 그대로 둬요.</p>
             </form>
             <div id="g-result"></div>
           </div>
@@ -974,6 +1186,115 @@ function dateTime_(v) {
   @keyframes pop { from { transform: scale(.6); } to { transform: scale(1); } }
   @keyframes stamp-in { from { transform: rotate(-10deg) scale(2); opacity: 0; } to { transform: rotate(-10deg) scale(1); opacity: 1; } }
   @keyframes today-pulse { 50% { outline-color: var(--yellow); } }
+
+  /* ───── v1.2.0: 글자 잘림 방지 ───── */
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+  .wrap { word-break: keep-all; overflow-wrap: break-word; line-height: 1.35; }
+  .btn, .tab, .stab, .nav-btn, .badge, .r-val, .c-tag, .seg-btn, .hud-cell b, .hud-cell small, .cal-head b, .legend span, .gb, .gift-bar { white-space: nowrap; }
+  .tab, .stab, .seg-btn { min-width: 0; overflow: hidden; text-overflow: ellipsis; padding-left: .2em; padding-right: .2em; }
+  .stab { white-space: normal; line-height: 1.2; padding-top: .4em; padding-bottom: .4em; }
+  #scr-admin .tab { font-size: .86em; }
+  .topbar { gap: .4em; }
+  .who { flex: 1; min-width: 0; }
+  .who b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .top-actions { flex-shrink: 0; }
+  .today { gap: .5em; padding: .55em .6em; }
+  .today .t-stamp { width: 20%; max-width: 5.5em; }
+  .today .t-date { line-height: 1.25; }
+  .today .t-val { font-size: 1.5em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .today .t-val small { font-size: .62em; }
+  .today .t-msg { line-height: 1.3; }
+  .cell .dn { font-size: .66em; line-height: 1.1; }
+  .cell .dv { font-size: .5em; line-height: 1.1; }
+  .legend { gap: .2em .55em; font-size: .68em; }
+  .coupon .c-code { word-break: keep-all; letter-spacing: 0; line-height: 1.25; }
+  .coupon .c-ico { width: 18%; max-width: 4em; flex-shrink: 0; padding: .4em; }
+  .coupon .c-top { display: flex; align-items: center; justify-content: space-between; gap: .3em; margin-bottom: .15em; }
+  .coupon .c-top .c-tag { position: static; margin-left: auto; }
+  .coupon .c-btn { margin: .4em 0 0; }
+  .coupon .c-meta { overflow-wrap: anywhere; }
+  .reward .rw-name, .rec .r-name { line-height: 1.25; }
+  .hud-cell { min-width: 0; padding: .2em .25em; }
+  .hud-cell b { font-size: .95em; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  .modal-box { max-height: 92%; overflow-y: auto; }
+  .modal-box .actions { flex-wrap: wrap; }
+  .filters input, .filters select { font-size: .9em; }
+
+  /* ───── v1.2.0: 미니게임 보상 ───── */
+  .ver { text-align: center; color: #56607a; font-size: .7em; margin: 0; }
+  .hud-btns { display: flex; flex-direction: column; gap: 2px; }
+  .hud-btns .btn { padding: .2em .5em; }
+  .gift-bar { display: flex; align-items: center; justify-content: center; gap: .4em; background: var(--ink); color: #94b0c2; font-size: .75em; padding: .25em; box-shadow: inset 0 0 0 2px #333c57; overflow: hidden; }
+  .gift-bar .gift-ico { width: 1.4em; height: 1.4em; flex-shrink: 0; }
+  .gift-bar b { color: var(--yellow); }
+  .gift-bar.hot { color: #fff; animation: hot 1s steps(2) infinite; }
+  .gift-bar.hot .gift-ico { animation: shake .3s steps(2) infinite; }
+  @keyframes hot { 50% { box-shadow: inset 0 0 0 2px var(--yellow); } }
+  .gb { display: inline-block; font-size: .68em; padding: 0 .35em; color: #fff; vertical-align: middle; font-family: 'Galmuri11', monospace; letter-spacing: 0; }
+  .gb-normal { background: #7a7a8c; } .gb-rare { background: var(--blue); } .gb-epic { background: #8f3fd6; }
+  .gb-legend { background: linear-gradient(90deg, #e43b44, #f77622, #38b764, #3b5dc9, #8f3fd6); }
+  .coupon.game.g-normal { background: #e8e8e0; }
+  .coupon.game.g-rare { background: #c9e6ff; }
+  .coupon.game.g-epic { background: #e3cdfb; }
+  .coupon.game.g-legend { background: #ffe9a8; animation: legend-glow 1.2s steps(2) infinite; }
+  .coupon.game.used { background: #c2c3c7; animation: none; }
+  @keyframes legend-glow { 50% { background: #fff6d8; } }
+  .intro { padding-top: .3em; }
+  .intro-ico { width: 26%; aspect-ratio: 1; margin: 0 auto .4em; position: relative; animation: shake .25s steps(2) infinite; }
+  .intro-ico .q { position: absolute; right: -18%; top: -18%; color: var(--red); font-size: 1.7em; font-family: 'Galmuri14','Galmuri11',monospace; }
+  .intro-a { font-weight: bold; text-align: center; margin: .3em 0; }
+  .intro-b { text-align: center; background: #fff6d8; padding: .6em; box-shadow: inset 0 0 0 2px #e2cf9a; line-height: 1.6; margin: .4em 0; }
+  .center { text-align: center; }
+  .tbl-wrap { overflow-x: auto; }
+  .tbl-s { font-size: .68em; width: 100%; margin: .3em 0; }
+  .tbl-s th, .tbl-s td { padding: .25em .15em; text-align: center; white-space: nowrap; }
+  .ri { font-size: .75em; margin: .35em 0; }
+
+  /* 보상 획득 이펙트 */
+  .modal.fx-box-wrap { background: rgba(0,0,0,.82); }
+  .modal-box.fx-box { background: transparent; box-shadow: none; width: 94%; padding: 0; overflow: visible; max-height: none; }
+  .fx { position: relative; text-align: center; color: #fff; min-height: 20em; display: flex; align-items: center; justify-content: center; }
+  .fx-rays { position: absolute; left: 50%; top: 42%; width: 44em; height: 44em; margin: -22em 0 0 -22em; border-radius: 50%; opacity: 0;
+    background: repeating-conic-gradient(var(--ray) 0 9deg, transparent 9deg 18deg);
+    -webkit-mask: radial-gradient(circle, #000 15%, transparent 62%); mask: radial-gradient(circle, #000 15%, transparent 62%);
+    animation: spin 8s linear infinite; pointer-events: none; }
+  .fx.open .fx-rays { opacity: .7; }
+  .fx-phase1 .fx-gift { width: 6em; height: 6em; margin: 0 auto .6em; animation: shake .1s steps(2) infinite; }
+  .fx-phase1 p { font-size: 1.2em; }
+  .fx.open .fx-phase1 { display: none; }
+  .fx-phase2 { display: none; position: relative; width: 100%; }
+  .fx.open .fx-phase2 { display: block; animation: pop .3s steps(4) both; }
+  .fx-score { margin: 0; color: #ddd; font-size: .85em; }
+  .fx-grade { font-family: 'Galmuri14','Galmuri11',monospace; font-size: 2.3em; color: var(--gc); text-shadow: 3px 3px 0 #000, -2px -2px 0 #000; animation: grade-in .5s steps(5) both; white-space: nowrap; }
+  .fx-card { background: var(--panel); color: var(--ink); margin: .5em auto; width: 86%; padding: .8em .6em; box-shadow: 0 0 0 3px var(--ink), 0 0 0 6px var(--gc), 0 0 28px 8px var(--gc); }
+  .fx-name { font-family: 'Galmuri14','Galmuri11',monospace; font-size: 1.3em; margin: .35em 0 .15em; }
+  .fx-desc { font-size: .8em; color: var(--muted); }
+  .fx-code { margin-top: .5em; font-size: .85em; letter-spacing: 1px; background: #fff; display: inline-block; padding: .15em .5em; box-shadow: inset 0 0 0 2px #c8c8b4; }
+  .fx .hint { color: #e8e8e8; }
+  .fx .actions { justify-content: center; }
+  .fx-parts { position: absolute; left: 50%; top: 42%; width: 0; height: 0; pointer-events: none; }
+  .fx-parts i { position: absolute; width: 6px; height: 6px; background: var(--gc); opacity: 0; box-shadow: 0 0 0 2px #000; }
+  .fx.open .fx-parts i { animation: burst .9s steps(6) var(--d) both; }
+  .fx::after { content: ''; position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none; }
+  .fx.open::after { animation: flash .45s steps(3) both; }
+  .fx-normal { --gc: #d6d6dc; --ray: rgba(255,255,255,.3); }
+  .fx-rare { --gc: #73eff7; --ray: rgba(115,239,247,.45); }
+  .fx-epic { --gc: #c58bff; --ray: rgba(197,139,255,.5); }
+  .fx-legend { --gc: #ffcd75; --ray: rgba(255,205,117,.6); }
+  .fx-legend .fx-grade { animation: grade-in .5s steps(5) both, rainbow .8s steps(4) .5s infinite; }
+  @keyframes burst { 0% { transform: translate(0, 0); opacity: 1; } 80% { opacity: 1; } 100% { transform: translate(var(--dx), var(--dy)); opacity: 0; } }
+  @keyframes shake { 0% { transform: rotate(-8deg); } 100% { transform: rotate(8deg) translateY(-3px); } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes grade-in { 0% { transform: scale(3); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+  @keyframes rainbow { 0% { color: #ffcd75; } 25% { color: #ff6b6b; } 50% { color: #a7f070; } 75% { color: #73eff7; } }
+  @keyframes flash { 0% { opacity: .95; } 100% { opacity: 0; } }
+
+  /* 관리자 기간 부여 */
+  .seg { display: flex; gap: 2px; margin: var(--px) 0; }
+  .seg-btn { flex: 1; border: 0; padding: .45em 0; background: #d8d8c4; cursor: pointer; }
+  .seg-btn.active { background: var(--blue); color: #fff; }
+  .chk { display: flex; align-items: center; gap: .4em; font-size: .9em; color: var(--ink) !important; margin-top: .3em; }
+  .chk input { width: 1.1em; height: 1.1em; margin: 0; box-shadow: none; padding: 0; }
 </style>
 #################### END OF Style.html ####################
 
@@ -1101,6 +1422,19 @@ var Sprites = (function () {
         '.KgGgGgGK.',
         '...KKKK...'], { K: '#1a1c2c', g: '#38b764', G: '#257179' });
     },
+    gift: function () {
+      return fromStrings([
+        '..rr..rr..',
+        '...rrrr...',
+        'KKKKrrKKKK',
+        'KyyyrryyyK',
+        'KKKKrrKKKK',
+        '.KyyrryyK.',
+        '.KyyrryyK.',
+        '.KyyrryyK.',
+        '.KyyrryyK.',
+        '.KKKKKKKK.'], { K: K, y: '#ffcd75', r: '#e43b44' });
+    },
     coffee: function () {
       return fromStrings([
         '..w..w....',
@@ -1208,7 +1542,7 @@ var FruitGame = (function () {
   var SCORE = [1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 66];
   var G = 0.045, SUB = 3, DAMP = 0.992, MAXV = 3.2;
 
-  var cvs, ctx, nextCvs, nctx, onOver, onScore;
+  var cvs, ctx, nextCvs, nctx, onOver, onScore, onReset, paused = false;
   var fruits, aimX, cur, next, cooldown, score, maxLv, dangerT, over, running, raf, last, idSeq;
   var sprites = [];
 
@@ -1251,7 +1585,7 @@ var FruitGame = (function () {
     cvs = document.getElementById('g-canvas'); ctx = cvs.getContext('2d');
     nextCvs = document.getElementById('g-next'); nctx = nextCvs.getContext('2d');
     ctx.imageSmoothingEnabled = false; nctx.imageSmoothingEnabled = false;
-    onOver = opts.onOver; onScore = opts.onScore;
+    onOver = opts.onOver; onScore = opts.onScore; onReset = opts.onReset;
     FRUITS.forEach(function (f, i) { sprites[i] = makeSprite(f, i); });
     var evo = document.getElementById('g-evo');
     evo.innerHTML = '';
@@ -1263,11 +1597,14 @@ var FruitGame = (function () {
       evo.appendChild(c);
     });
     function px(e) { var r = cvs.getBoundingClientRect(); return (e.clientX - r.left) / r.width * W; }
-    cvs.addEventListener('pointerdown', function (e) { if (over) return; aimX = px(e); cvs.setPointerCapture(e.pointerId); });
-    cvs.addEventListener('pointermove', function (e) { if (!over) aimX = px(e); });
-    cvs.addEventListener('pointerup', function (e) { if (!over) { aimX = px(e); drop(); } });
+    cvs.addEventListener('pointerdown', function (e) { if (over || blocked()) return; aimX = px(e); cvs.setPointerCapture(e.pointerId); });
+    cvs.addEventListener('pointermove', function (e) { if (!over && !blocked()) aimX = px(e); });
+    cvs.addEventListener('pointerup', function (e) { if (!over && !blocked()) { aimX = px(e); drop(); } });
     reset();
   }
+
+  // 팝업(모달)이 열려 있으면 게임 일시정지
+  function blocked() { var m = document.getElementById('modal'); return paused || (m && !m.classList.contains('hidden')); }
 
   function rnd() { return Math.floor(Math.random() * 5); }
   function reset() {
@@ -1276,6 +1613,7 @@ var FruitGame = (function () {
     onScore && onScore(score);
     drawNext();
     document.getElementById('g-over').classList.add('hidden');
+    onReset && onReset();
   }
 
   function drawNext() {
@@ -1387,7 +1725,7 @@ var FruitGame = (function () {
   function loop(t) {
     if (!running) return;
     var dt = Math.min(50, t - (last || t)); last = t;
-    if (!over) {
+    if (!over && !blocked()) {
       var n = Math.max(1, Math.round(dt / 16.67));
       for (var k = 0; k < n; k++) { step(); if (cooldown > 0) cooldown--; }
       checkOver(dt);
@@ -1399,7 +1737,10 @@ var FruitGame = (function () {
   function start() { if (running) return; running = true; last = 0; raf = requestAnimationFrame(loop); }
   function stop() { running = false; cancelAnimationFrame(raf); }
 
-  return { init: init, start: start, stop: stop, reset: reset, FRUITS: FRUITS };
+  function pause() { paused = true; }
+  function resume() { paused = false; last = 0; }
+  function getScore() { return score; }
+  return { init: init, start: start, stop: stop, reset: reset, pause: pause, resume: resume, getScore: getScore, FRUITS: FRUITS };
 })();
 </script>
 #################### END OF Game.html ####################
@@ -1448,8 +1789,19 @@ var FruitGame = (function () {
   function show(id) {
     document.querySelectorAll('.screen').forEach(function (s) { s.classList.toggle('active', s.id === id); });
   }
-  function openModal(html) { $('modal-box').innerHTML = html; $('modal').classList.remove('hidden'); Sprites.hydrate($('modal-box')); }
-  function closeModal() { $('modal').classList.add('hidden'); }
+  var modalOnClose = null;
+  function openModal(html, opts) {
+    opts = opts || {};
+    if (modalOnClose) { var f = modalOnClose; modalOnClose = null; f(); }
+    $('modal-box').className = 'px-box modal-box ' + (opts.cls || '');
+    $('modal').className = 'modal ' + (opts.cls ? opts.cls + '-wrap' : '');
+    $('modal-box').innerHTML = html; Sprites.hydrate($('modal-box'));
+    modalOnClose = opts.onClose || null;
+  }
+  function closeModal() {
+    $('modal').classList.add('hidden');
+    if (modalOnClose) { var f = modalOnClose; modalOnClose = null; f(); }
+  }
 
   function stampHTML(status) {
     if (status === '승인') return Sprites.get('stamp-pass');
@@ -1697,14 +2049,18 @@ var FruitGame = (function () {
   }
 
   function couponHTML(c, admin) {
-    return '<div class="coupon ' + (c.used ? 'used' : '') + '">' +
+    var gk = GRADE_KEY[c.grade] || 'normal';
+    return '<div class="coupon ' + (c.used ? 'used' : '') + (c.game ? ' game g-' + gk : '') + '">' +
       '<div class="c-ico">' + Sprites.get(c.icon || 'ticket') + '</div>' +
-      '<div class="c-body"><div class="c-code">' + esc(c.rewardName) + '</div>' +
-      '<div class="c-meta">' + (admin === true ? '<b>' + esc(c.name) + '</b> · ' : '') + esc(c.desc) + '</div>' +
-      '<div class="c-meta">코드 <b>' + esc(c.code) + '</b></div>' +
-      '<div class="c-meta">' + (c.ym ? (+c.ym.slice(5)) + '월 도장 · ' : '') + '발급 ' + esc(c.issuedAt) + (c.used ? ' · 사용 ' + esc(c.usedAt) : '') + '</div></div>' +
-      (admin === true ? '<button class="btn btn-s ' + (c.used ? 'btn-dark' : 'btn-red') + '" data-action="use-coupon" data-code="' + esc(c.code) + '">' + (c.used ? '되돌리기' : '사용처리') + '</button>' : '') +
-      '<span class="c-tag">' + (c.used ? '사용완료' : '사용가능') + '</span></div>';
+      '<div class="c-body">' +
+        '<div class="c-top">' + (c.game ? '<span class="gb gb-' + gk + '">' + esc(c.grade) + '</span>' : '') +
+          '<span class="c-tag">' + (c.used ? '사용완료' : '사용가능') + '</span></div>' +
+        '<div class="c-code">' + esc(c.rewardName) + '</div>' +
+        '<div class="c-meta">' + (admin === true ? '<b>' + esc(c.name) + '</b> · ' : '') + esc(c.desc) + '</div>' +
+        '<div class="c-meta">코드 <b>' + esc(c.code) + '</b></div>' +
+        '<div class="c-meta">' + (c.game ? '🎮 미니게임 보상 · ' : c.ym ? (+c.ym.slice(5)) + '월 도장 · ' : '') + '발급 ' + esc(c.issuedAt) + (c.used ? ' · 사용 ' + esc(c.usedAt) : '') + '</div>' +
+        (admin === true ? '<button class="btn btn-s c-btn ' + (c.used ? 'btn-dark' : 'btn-red') + '" data-action="use-coupon" data-code="' + esc(c.code) + '">' + (c.used ? '되돌리기' : '사용처리') + '</button>' : '') +
+      '</div></div>';
   }
 
   function userPane(id) {
@@ -1712,8 +2068,10 @@ var FruitGame = (function () {
     document.querySelectorAll('.nav-btn').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-pane') === id); });
     if (id === 'pane-game') {
       if (!S.gameReady) {
+        S.gameReady = true;
         FruitGame.init({
-          onScore: function (s) { $('g-score').textContent = s; },
+          onScore: onGameScore,
+          onReset: onGameReset,
           onOver: function (score, maxLv) {
             $('g-saved').textContent = '기록 저장 중...';
             quiet('saveGameScore', S.name, score, maxLv).then(function (r) {
@@ -1723,11 +2081,128 @@ var FruitGame = (function () {
             }).catch(function () { $('g-saved').textContent = '저장 실패 (네트워크 확인)'; });
           },
         });
-        S.gameReady = true;
         quiet('getGameRanking', S.name).then(function (r) { $('g-best').textContent = r.myBest; });
       }
       FruitGame.start();
+      processDrops();
     } else if (S.gameReady) FruitGame.stop();
+  }
+
+  /* ── 미니게임 점수 보상 ── */
+  var G = { sid: null, info: null, start: 2500, step: 500, next: 2500, queue: [], rolling: false, limitedShown: false };
+
+  function onGameReset() {
+    G.sid = null; G.queue = []; G.rolling = false; G.limitedShown = false;
+    var gen = (G.gen = (G.gen || 0) + 1);
+    // 세션을 먼저 받은 뒤 안내 팝업 (팝업이 열려 있는 동안 게임은 자동 정지)
+    $('modal-box').className = 'px-box modal-box'; openModal('<p class="center">두근두근... <span class="dots">...</span></p>');
+    quiet('startGameSession', S.name).then(function (r) {
+      if (gen !== G.gen) return;
+      G.sid = r.sessionId; G.info = r.info; G.start = r.info.start; G.step = r.info.step; G.next = G.start;
+      updateGiftBar(FruitGame.getScore());
+      showGameIntro();
+    }).catch(function () { if (gen === G.gen) { G.next = G.start; updateGiftBar(0); showGameIntro(); } });
+  }
+
+  var INTROS = [
+    ['📜', '낡은 쪽지가 떨어져 있다...', '「{S}점... 그 너머에서 무언가가 떨어진다는 소문이 있다.<br>점수가 오를수록... 더 귀한 것이...」'],
+    ['🔮', '수정구슬이 희미하게 빛난다...', '「{S}점을 넘어서는 자에게<br>특별한 선물이 내려지리라...」'],
+    ['🐱', '길고양이가 다가와 속삭였다...', '「야옹... {S}점... 넘으면...<br>좋은 거... 나올지도... 냥...」'],
+    ['📻', '지지직... 수상한 무전이 들려온다...', '「...여기는 본부... {S}점 돌파 시...<br>보급품 투하 가능성 있음... 이상...」'],
+  ];
+  function showGameIntro() {
+    var t = INTROS[Math.floor(Math.random() * INTROS.length)];
+    var st = G.start.toLocaleString();
+    openModal(
+      '<div class="intro"><div class="intro-ico"><span data-sprite="gift"></span><b class="q blink">?</b></div>' +
+      '<p class="intro-a">' + t[0] + ' ' + t[1] + '</p>' +
+      '<p class="intro-b">' + t[2].replace('{S}', st) + '</p>' +
+      '<p class="hint center">※ 반드시 나오는 건 아니에요. 운이 좋다면...?</p></div>' +
+      '<div class="actions"><button class="btn btn-dark" data-action="game-info">?</button>' +
+      '<button class="btn btn-green" data-action="close">도전한다!</button></div>',
+      { cls: 'intro-box' });
+  }
+
+  function updateGiftBar(score) {
+    var el = $('g-gifttxt');
+    if (score < G.start) el.innerHTML = '<b>' + G.start.toLocaleString() + '</b>점을 넘으면...?';
+    else el.innerHTML = '다음 두근두근 <b>' + G.next.toLocaleString() + '</b>점';
+    $('g-giftbar').classList.toggle('hot', score >= G.start);
+  }
+
+  function onGameScore(score) {
+    $('g-score').textContent = score;
+    if (G.sid) {
+      while (score >= G.next) { G.queue.push(G.next); G.next += G.step; }
+      processDrops();
+    }
+    updateGiftBar(score);
+  }
+
+  function processDrops() {
+    if (G.rolling || !G.queue.length || !G.sid) return;
+    if (!$('pane-game').classList.contains('active') || !$('scr-user').classList.contains('active')) return; // 게임 화면으로 돌아오면 이어서 추첨
+    G.rolling = true;
+    var th = G.queue.shift();
+    quiet('rollGameDrop', S.name, G.sid, th, FruitGame.getScore()).then(function (r) {
+      G.rolling = false;
+      if (r.dropped) { showDrop(r); return; }
+      if (r.limited) { if (!G.limitedShown) toast('🎁 오늘 받을 수 있는 선물(' + r.limit + '개)을 모두 받았어요. 내일 또 만나요!'); G.limitedShown = true; }
+      else if (!r.duplicate) toast(pick(['✨ ' + th.toLocaleString() + '점 돌파! ...아무 일도 일어나지 않았다.', '✨ ' + th.toLocaleString() + '점! 무언가 스쳐 지나갔다... 다음엔...?', '✨ ' + th.toLocaleString() + '점! 바람 소리만 들린다...']));
+      processDrops();
+    }).catch(function () { G.rolling = false; processDrops(); });
+  }
+  function pick(a) { return a[Math.floor(Math.random() * a.length)]; }
+
+  var GRADE_KEY = { '노멀': 'normal', '레어': 'rare', '에픽': 'epic', '레전드': 'legend' };
+  var GRADE_EN = { '노멀': 'NORMAL', '레어': 'RARE!', '에픽': 'EPIC!!', '레전드': 'LEGEND!!!' };
+
+  function showDrop(r) {
+    var key = GRADE_KEY[r.grade] || 'normal', parts = '';
+    for (var i = 0; i < 28; i++) {
+      var ang = (i / 28) * Math.PI * 2, dist = 70 + Math.random() * 80;
+      parts += '<i style="--dx:' + Math.round(Math.cos(ang) * dist) + 'px;--dy:' + Math.round(Math.sin(ang) * dist) + 'px;--d:' + (Math.random() * .25).toFixed(2) + 's"></i>';
+    }
+    openModal(
+      '<div class="fx fx-' + key + '">' +
+        '<div class="fx-rays"></div><div class="fx-parts">' + parts + '</div>' +
+        '<div class="fx-phase1"><div class="fx-gift"><span data-sprite="gift"></span></div><p class="blink">두근두근...</p></div>' +
+        '<div class="fx-phase2">' +
+          '<p class="fx-score">' + r.threshold.toLocaleString() + '점 돌파 보상!</p>' +
+          '<div class="fx-grade">' + GRADE_EN[r.grade] + '</div>' +
+          '<div class="fx-card"><span class="gb gb-' + key + '">' + esc(r.grade) + '</span>' +
+            '<div class="fx-name">' + esc(r.rewardName) + '</div><div class="fx-desc">' + esc(r.desc) + '</div>' +
+            '<div class="fx-code">' + esc(r.code) + '</div></div>' +
+          '<p class="hint center">쿠폰함에 저장됐어요!' + (r.remainingToday != null ? ' (오늘 남은 선물 ' + Math.max(0, r.remainingToday) + '개)' : '') + '</p>' +
+          '<div class="actions"><button class="btn btn-dark" data-action="goto-coupon">쿠폰함</button><button class="btn btn-green" data-action="close">계속하기</button></div>' +
+        '</div>' +
+      '</div>',
+      { cls: 'fx-box', onClose: function () { refreshCoupons(); processDrops(); } });
+    setTimeout(function () { var f = document.querySelector('#modal-box .fx'); if (f) f.classList.add('open'); }, 1100);
+  }
+
+  function refreshCoupons() {
+    quiet('getUserMonth', S.name, S.ym).then(applyMonth).catch(function () {});
+  }
+
+  function showGameInfo() {
+    var go = function (info) {
+      var rows = info.table.map(function (t) {
+        return '<tr><td>' + t.score.toLocaleString() + '+</td><td><b>' + t.chance + '%</b></td>' +
+          ['노멀', '레어', '에픽', '레전드'].map(function (g) { return '<td>' + t.grades[g] + '</td>'; }).join('') + '</tr>';
+      }).join('');
+      var byGrade = ['노멀', '레어', '에픽', '레전드'].map(function (g) {
+        return '<div class="ri"><span class="gb gb-' + GRADE_KEY[g] + '">' + g + '</span> ' +
+          info.rewards.filter(function (x) { return x.grade === g; }).map(function (x) { return esc(x.name); }).join(', ') + '</div>';
+      }).join('');
+      openModal('<h3>🎁 비밀 보상 정보</h3>' +
+        '<p class="hint">' + info.start.toLocaleString() + '점부터 ' + info.step.toLocaleString() + '점마다 한 번씩 추첨! 높을수록 확률과 등급이 올라가요.</p>' +
+        '<div class="tbl-wrap"><table class="tbl tbl-s"><tr><th>점수</th><th>당첨</th><th>노멀</th><th>레어</th><th>에픽</th><th>레전드</th></tr>' + rows + '</table></div>' +
+        byGrade +
+        (info.limit > 0 ? '<p class="hint">하루 최대 ' + info.limit + '개' + (info.remainingToday != null ? ' · 오늘 남은 선물 ' + info.remainingToday + '개' : '') + '</p>' : '') +
+        '<div class="actions"><button class="btn btn-green" data-action="close">닫기</button></div>');
+    };
+    if (G.info) go(G.info); else call('startGameSession', S.name).then(function (r) { G.info = r.info; go(r.info); });
   }
 
   function showRanking() {
@@ -1748,7 +2223,9 @@ var FruitGame = (function () {
     if (t === 'rec') adminSearch();
     if (t === 'grant') {
       if (!$('g-date').value) $('g-date').value = S.today;
-      $('g-date').max = S.today;
+      if (!$('g-date2').value) $('g-date2').value = S.today;
+      $('g-date').max = S.today; $('g-date2').max = S.today;
+      rangeInfo();
       quiet('adminListUsers', S.admin).then(function (list) {
         $('g-users').innerHTML = list.map(function (n) { return '<option value="' + esc(n) + '">'; }).join('');
       }).catch(function () {});
@@ -1808,10 +2285,12 @@ var FruitGame = (function () {
       else if (a === 'save') saveInput(el.getAttribute('data-date'));
       else if (a === 'quick') { var inp = $('m-val'); inp.value = Math.max(0, (Number(inp.value) || 0) + Number(el.getAttribute('data-n'))); judge(); }
       else if (a === 'game-restart') FruitGame.reset();
+      else if (a === 'game-info') showGameInfo();
+      else if (a === 'grant-go') { var pg = S.pendingGrant; closeModal(); if (pg) doGrantRange(pg.name, pg.r, pg.value, pg.memo); }
       else if (a === 'game-rank') showRanking();
       else if (a === 'admin-search') adminSearch();
       else if (a === 'review') review(el.getAttribute('data-date'), el.getAttribute('data-name'), el.getAttribute('data-d'));
-      else if (a === 'goto-coupon') { userPane('pane-coupon'); cpTab('have'); }
+      else if (a === 'goto-coupon') { userPane('pane-coupon'); cpTab('have'); closeModal(); }
       else if (a === 'wallet-month') { S.walletYm = el.getAttribute('data-ym'); renderCoupons(); }
       else if (a === 'exchange') askExchange(el.getAttribute('data-id'));
       else if (a === 'do-exchange') doExchange(el.getAttribute('data-id'));
@@ -1826,19 +2305,74 @@ var FruitGame = (function () {
     if (at) return adminTab(at.getAttribute('data-admin-tab'));
     if (e.target.id === 'modal') closeModal();
   });
+  var grantMode = 'day';
+  function setGrantMode(m) {
+    grantMode = m;
+    document.querySelectorAll('[data-grant-mode]').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-grant-mode') === m); });
+    $('g-range-box').classList.toggle('hidden', m !== 'range');
+    $('g-date-label').textContent = m === 'range' ? '시작일' : '날짜';
+    rangeInfo();
+  }
+  function rangeDates() {
+    var a = $('g-date').value, b = $('g-date2').value;
+    if (!a || !b) return null;
+    if (a > b) { var t = a; a = b; b = t; }
+    var out = [], skip = $('g-skipwk').checked, d = new Date(a + 'T00:00:00'), end = new Date(b + 'T00:00:00'), future = 0, wk = 0;
+    while (d <= end) {
+      var ds = d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+      if (ds > S.today) future++;
+      else if (skip && (d.getDay() === 0 || d.getDay() === 6)) wk++;
+      else out.push(ds);
+      d.setDate(d.getDate() + 1);
+    }
+    return { from: a, to: b, days: out.length, future: future, weekend: wk };
+  }
+  function rangeInfo() {
+    if (grantMode !== 'range') return;
+    var r = rangeDates();
+    $('g-range-info').innerHTML = r ? '총 <b>' + r.days + '일</b>에 도장' + (r.weekend ? ' · 주말 ' + r.weekend + '일 제외' : '') + (r.future ? ' · 미래 ' + r.future + '일 제외' : '') + (r.days > 93 ? ' <b style="color:var(--red)">(최대 93일)</b>' : '') : '시작일과 종료일을 고르세요.';
+  }
+  ['g-date', 'g-date2', 'g-skipwk'].forEach(function (id) { $(id).addEventListener('change', rangeInfo); $(id).addEventListener('input', rangeInfo); });
+  document.querySelectorAll('[data-grant-mode]').forEach(function (b) { b.onclick = function () { setGrantMode(b.getAttribute('data-grant-mode')); }; });
+
+  function grantDone(name, label, res) {
+    var w = res.wallet;
+    var detail = res.days > 1 || grantMode === 'range'
+      ? '새로 ' + res.created + '일 · 승인으로 변경 ' + res.updated + '일' + (res.already ? ' · 이미 승인 ' + res.already + '일' : '') + (res.weekend ? ' · 주말 제외 ' + res.weekend + '일' : '')
+      : (res.existed ? '기존 기록 승인' : '새 기록');
+    $('g-result').innerHTML = '<div class="rec px-box"><div class="r-st">' + Sprites.get('stamp-pass') + '</div>' +
+      '<div class="r-main"><div class="r-name">' + esc(name) + '</div><div class="r-date">' + label + ' 합격 도장</div>' +
+      '<div class="r-date">' + detail + '</div>' +
+      '<div class="r-date">' + (+w.ym.slice(5)) + '월 보유 도장 ' + w.balance + '개 · 출석 ' + w.approved + '/' + w.days + '일</div></div></div>';
+    $('g-value').value = ''; $('g-memo').value = '';
+    $('g-result').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    toast(name + ' · ' + label + ' 합격 도장 완료!');
+  }
+
+  function doGrantRange(name, r, value, memo) {
+    call('adminGrantStampRange', S.admin, name, r.from, r.to, value, memo, $('g-skipwk').checked).then(function (res) {
+      grantDone(name, fmtDate(r.from) + ' ~ ' + fmtDate(r.to), res);
+    });
+  }
+
   $('form-grant').onsubmit = function (e) {
     e.preventDefault();
     var name = $('g-user').value.trim(), date = $('g-date').value, value = $('g-value').value, memo = $('g-memo').value;
     if (!name) return toast('사용자를 입력하세요.');
     if (!date) return toast('날짜를 선택하세요.');
-    call('adminGrantStamp', S.admin, name, date, value, memo).then(function (res) {
-      var w = res.wallet;
-      $('g-result').innerHTML = '<div class="rec px-box"><div class="r-st">' + Sprites.get('stamp-pass') + '</div>' +
-        '<div class="r-main"><div class="r-name">' + esc(name) + '</div><div class="r-date">' + fmtDate(date) + ' 합격 도장 ' + (res.existed ? '(기존 기록 승인)' : '(새 기록)') + '</div>' +
-        '<div class="r-date">' + (+w.ym.slice(5)) + '월 보유 도장 ' + w.balance + '개 · 출석 ' + w.approved + '/' + w.days + '일</div></div></div>';
-      $('g-value').value = ''; $('g-memo').value = '';
-      toast(name + ' · ' + fmtDate(date) + ' 합격 도장 완료!');
-    });
+    if (grantMode === 'range') {
+      var r = rangeDates();
+      if (!r) return toast('종료일을 선택하세요.');
+      if (!r.days) return toast('부여할 날짜가 없어요.');
+      if (r.days > 93) return toast('한 번에 최대 93일까지 부여할 수 있어요.');
+      S.pendingGrant = { name: name, r: r, value: value, memo: memo };
+      return openModal('<h3>기간 일괄 도장</h3><div class="center"><div class="big-stamp" style="width:30%">' + Sprites.get('stamp-pass') + '</div>' +
+        '<p><b>' + esc(name) + '</b><br>' + fmtDate(r.from) + ' ~ ' + fmtDate(r.to) + '</p>' +
+        '<p>총 <b>' + r.days + '일</b>에 합격 도장을 찍을까요?</p>' +
+        '<p class="hint">' + (r.weekend ? '주말 ' + r.weekend + '일 제외 · ' : '') + '이미 승인된 날은 그대로 둬요.</p></div>' +
+        '<div class="actions"><button class="btn btn-dark" data-action="close">취소</button><button class="btn btn-green" data-action="grant-go">찍기</button></div>');
+    }
+    call('adminGrantStamp', S.admin, name, date, value, memo).then(function (res) { grantDone(name, fmtDate(date), res); });
   };
   $('f-status').onchange = adminSearch;
   $('f-date').onchange = adminSearch;

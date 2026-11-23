@@ -35,6 +35,7 @@
           <button class="btn btn-blue" type="submit">▶ 관리자 로그인</button>
         </form>
         <p class="foot">PRESS START · <span id="boot-th">300</span> 이상이면 통과!</p>
+        <p class="ver">v<?= appVersion ?></p>
       </section>
 
       <!-- ───── 사용자 메인 ───── -->
@@ -91,8 +92,12 @@
               <div class="hud-cell"><small>SCORE</small><b id="g-score">0</b></div>
               <div class="hud-cell"><small>NEXT</small><canvas id="g-next" width="24" height="24"></canvas></div>
               <div class="hud-cell"><small>BEST</small><b id="g-best">0</b></div>
-              <button class="btn btn-s btn-dark" data-action="game-rank">순위</button>
+              <div class="hud-btns">
+                <button class="btn btn-s btn-dark" data-action="game-rank">순위</button>
+                <button class="btn btn-s btn-yellow" data-action="game-info" title="보상 확률">?</button>
+              </div>
             </div>
+            <div class="gift-bar" id="g-giftbar"><span class="gift-ico" data-sprite="gift"></span><span id="g-gifttxt">???</span></div>
             <div class="game-stage" id="g-stage">
               <canvas id="g-canvas" width="120" height="168"></canvas>
               <div class="g-over hidden" id="g-over">
@@ -149,14 +154,25 @@
               <label>사용자</label>
               <input id="g-user" list="g-users" placeholder="사용자 이름" autocomplete="off">
               <datalist id="g-users"></datalist>
-              <label>날짜</label>
+              <label>부여 방식</label>
+              <div class="seg">
+                <button type="button" class="seg-btn active" data-grant-mode="day">하루</button>
+                <button type="button" class="seg-btn" data-grant-mode="range">기간 일괄</button>
+              </div>
+              <label id="g-date-label">날짜</label>
               <input id="g-date" type="date">
+              <div id="g-range-box" class="hidden">
+                <label>종료일</label>
+                <input id="g-date2" type="date">
+                <label class="chk"><input type="checkbox" id="g-skipwk"> 토·일 제외</label>
+                <p class="hint" id="g-range-info"></p>
+              </div>
               <label>운동 수치 (선택 · 비우면 수치 없이 도장만)</label>
               <input id="g-value" type="number" inputmode="numeric" min="0" max="100000" placeholder="예) 300">
               <label>메모 (선택)</label>
               <input id="g-memo" maxlength="100" placeholder="예) 출장으로 기록 누락">
               <button class="btn btn-green" type="submit">★ 합격 도장 찍기</button>
-              <p class="hint">기록이 없으면 새로 만들고, 있으면 그 기록을 <b>승인</b>으로 바꿔요. 비승인 기록도 합격으로 바뀌어요.</p>
+              <p class="hint">기록이 없으면 새로 만들고, 있으면 그 기록을 <b>승인</b>으로 바꿔요. 비승인 기록도 합격으로 바뀌어요. 기간 일괄일 때 이미 승인된 날은 그대로 둬요.</p>
             </form>
             <div id="g-result"></div>
           </div>

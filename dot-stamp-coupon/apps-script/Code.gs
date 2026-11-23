@@ -8,20 +8,26 @@
  *  - Coupons : 도장을 소모해 교환한 쿠폰
  *  - Rewards : 교환 가능한 보상 목록 (필요 도장 수 / 만근)  ← 시트에서 수정 가능
  *  - Games   : 미니게임(도트 과일 합치기) 점수
- *  - Config  : 통과 기준 수치, 쿠폰 발급 기준 등 설정값
+ *  - GameRewards : 미니게임 점수 보상 목록 (등급별)  ← 시트에서 수정 가능
+ *  - Config  : 통과 기준 수치, 미니게임 보상 확률 등 설정값
+ *
+ * 버전: APP_VERSION 참고 / 변경 기록은 CHANGELOG.md
  */
 
 // 비워두면 이 스크립트가 연결된(컨테이너 바인딩) 스프레드시트를 사용합니다.
 // 독립형 스크립트라면 스프레드시트 ID를 넣으세요.
 const SPREADSHEET_ID = '';
 
+const APP_VERSION = '1.2.0';
+
 const SHEETS = {
   USERS:   { name: 'Users',   headers: ['이름', '가입일시', '최근접속'] },
   RECORDS: { name: 'Records', headers: ['날짜', '이름', '운동수치', '자동판정', '승인상태', '처리관리자', '처리일시', '입력일시', '비고'] },
   ADMINS:  { name: 'Admins',  headers: ['관리자이름', '비밀번호', '메모'] },
-  COUPONS: { name: 'Coupons', headers: ['쿠폰코드', '이름', '발급일시', '보상ID', '보상이름', '대상월', '소모도장', '사용여부', '사용일시'] },
+  COUPONS: { name: 'Coupons', headers: ['쿠폰코드', '이름', '발급일시', '보상ID', '보상이름', '대상월', '소모도장', '사용여부', '사용일시', '등급'] },
   REWARDS: { name: 'Rewards', headers: ['보상ID', '보상이름', '설명', '필요도장', '아이콘'] },
   GAMES:   { name: 'Games',   headers: ['일시', '이름', '점수', '최고단계'] },
+  GAME_REWARDS: { name: 'GameRewards', headers: ['등급', '보상이름', '설명'] },
   CONFIG:  { name: 'Config',  headers: ['키', '값', '설명'] },
 };
 
@@ -30,6 +36,28 @@ const DEFAULT_CONFIG = [
   ['PASS_THRESHOLD', 300, '이 값 이상이면 통과(초록), 미만이면 미통과(빨강)'],
   ['EXCHANGE_GRACE_DAYS', 7, '지난달 도장을 다음 달 며칠까지 교환할 수 있는지 (월말 승인 지연 대비)'],
   ['COUPON_PREFIX', 'FIT', '쿠폰 코드 앞글자'],
+  ['GAME_DROP_START', 2500, '미니게임: 이 점수를 넘으면 보상 추첨 시작'],
+  ['GAME_DROP_STEP', 500, '미니게임: 이 점수만큼 더 오를 때마다 한 번 더 추첨 + 확률 상승'],
+  ['GAME_DROP_BASE', 15, '미니게임: 시작 점수 돌파 시 당첨 확률(%)'],
+  ['GAME_DROP_INC', 5, '미니게임: 단계마다 늘어나는 당첨 확률(%p)'],
+  ['GAME_DROP_MAX', 60, '미니게임: 최대 당첨 확률(%)'],
+  ['GAME_DROP_DAILY_LIMIT', 3, '미니게임: 한 사람이 하루에 받을 수 있는 보상 수 (0 = 제한 없음)'],
+];
+
+// 미니게임 점수 보상 (등급: 노멀 / 레어 / 에픽 / 레전드)
+const GRADES = ['노멀', '레어', '에픽', '레전드'];
+const DEFAULT_GAME_REWARDS = [
+  ['노멀', '커피 쿠폰 (1,500원)', '1,500원 이하 커피 1잔'],
+  ['노멀', '뽀뽀 1회권', '뽀뽀 1회'],
+  ['노멀', '심부름 1회권', '심부름 1회'],
+  ['레어', '커피 쿠폰 (5,000원)', '5,000원 이하 커피 1잔'],
+  ['레어', '빨래 1회권', '빨래 1회 대신 해주기'],
+  ['레어', '귀 후벼주기 1분권', '귀 청소 1분'],
+  ['에픽', '자동차 1회 이용권', '자동차 1회 이용'],
+  ['에픽', '귀 후벼주기 3분권', '귀 청소 3분'],
+  ['에픽', '안마 3분권', '안마 3분'],
+  ['레전드', '근처 여행 1회권', '근처로 여행 1회'],
+  ['레전드', '안마 5분권', '안마 5분'],
 ];
 
 // 필요도장: 숫자 = 그달 도장 N개 소모 / '만근' = 그달 모든 날짜 승인 시 (도장 소모 없음, 월 1회)
@@ -48,6 +76,7 @@ function doGet() {
   ensureSheets_();
   const tpl = HtmlService.createTemplateFromFile('Index');
   tpl.appTitle = config_().APP_TITLE;
+  tpl.appVersion = APP_VERSION;
   return tpl.evaluate()
     .setTitle(config_().APP_TITLE)
     .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no')
@@ -67,7 +96,7 @@ function setup() {
 
 function getBootstrap() {
   const cfg = config_();
-  return { title: cfg.APP_TITLE, threshold: cfg.PASS_THRESHOLD, today: today_() };
+  return { title: cfg.APP_TITLE, threshold: cfg.PASS_THRESHOLD, today: today_(), version: APP_VERSION };
 }
 
 /* ───────────────────────── 사용자 ───────────────────────── */
@@ -194,6 +223,107 @@ function getGameRanking(name) {
   return { top: list.slice(0, 10), myBest: name && best[name] != null ? best[name] : 0, myPlays: plays };
 }
 
+/* ───────────────────────── 미니게임 점수 보상 ───────────────────────── */
+
+/** 게임 한 판 시작: 추첨 중복을 막기 위한 세션 발급 */
+function startGameSession(name) {
+  name = cleanName_(name);
+  const id = Utilities.getUuid();
+  CacheService.getScriptCache().put('gs_' + id, JSON.stringify({ name: name, rolled: [] }), 21600);
+  return { sessionId: id, info: dropInfo_(name) };
+}
+
+/** threshold(2500, 3000, ...) 를 넘었을 때 한 번 추첨. 당첨되면 쿠폰 발급 */
+function rollGameDrop(name, sessionId, threshold, score) {
+  name = cleanName_(name);
+  const cfg = config_();
+  threshold = Number(threshold); score = Number(score);
+  const start = cfg.GAME_DROP_START, step = cfg.GAME_DROP_STEP;
+  if (!(threshold >= start) || (threshold - start) % step !== 0 || !(score >= threshold)) throw new Error('잘못된 추첨 요청이에요.');
+  return withLock_(function () {
+    const cache = CacheService.getScriptCache();
+    const key = 'gs_' + String(sessionId);
+    const raw = cache.get(key);
+    if (!raw) throw new Error('게임 세션이 만료됐어요. 새 게임을 시작하세요.');
+    const ses = JSON.parse(raw);
+    if (ses.name !== name) throw new Error('잘못된 게임 세션이에요.');
+    if (ses.rolled.indexOf(threshold) >= 0) return { dropped: false, duplicate: true, threshold: threshold };
+    ses.rolled.push(threshold);
+    cache.put(key, JSON.stringify(ses), 21600);
+
+    const k = (threshold - start) / step;
+    const chance = dropChance_(cfg, k);
+    const todayCount = gameDropsToday_(name);
+    const limit = cfg.GAME_DROP_DAILY_LIMIT;
+    if (limit > 0 && todayCount >= limit) return { dropped: false, limited: true, threshold: threshold, chance: chance, limit: limit };
+    if (Math.random() * 100 >= chance) return { dropped: false, threshold: threshold, chance: chance };
+
+    const grade = pickGrade_(k);
+    const pool = gameRewards_().filter(function (r) { return r.grade === grade; });
+    const all = gameRewards_();
+    const reward = pool.length ? pool[Math.floor(Math.random() * pool.length)] : all[Math.floor(Math.random() * all.length)];
+    const code = makeCouponCode_(cfg.COUPON_PREFIX);
+    sheet_('COUPONS').appendRow([code, name, nowStr_(), 'GAME', reward.name, '게임', 0, '미사용', '', reward.grade]);
+    return {
+      dropped: true, threshold: threshold, chance: chance, grade: reward.grade, rewardName: reward.name, desc: reward.desc, code: code,
+      remainingToday: limit > 0 ? limit - todayCount - 1 : null,
+    };
+  });
+}
+
+function dropChance_(cfg, k) { return Math.min(cfg.GAME_DROP_MAX, cfg.GAME_DROP_BASE + cfg.GAME_DROP_INC * k); }
+
+/** 단계(k)가 높을수록 높은 등급 비중 증가 */
+function gradeWeights_(k) {
+  return { '노멀': Math.max(30, 70 - 6 * k), '레어': 22 + 2 * k, '에픽': 7 + 2.5 * k, '레전드': 1 + 1.5 * k };
+}
+function pickGrade_(k) {
+  const w = gradeWeights_(k);
+  let total = 0; GRADES.forEach(function (g) { total += w[g]; });
+  let x = Math.random() * total;
+  for (let i = 0; i < GRADES.length; i++) { x -= w[GRADES[i]]; if (x < 0) return GRADES[i]; }
+  return GRADES[0];
+}
+
+function gameDropsToday_(name) {
+  const t = today_();
+  return rows_('COUPONS').filter(function (r) {
+    return String(r[1]).trim() === name && String(r[3]) === 'GAME' && dateTime_(r[2]).slice(0, 10) === t;
+  }).length;
+}
+
+/** 확률표 (화면 안내용) */
+function dropInfo_(name) {
+  const cfg = config_();
+  const rows = [];
+  for (let k = 0; k < 8; k++) {
+    const w = gradeWeights_(k);
+    let total = 0; GRADES.forEach(function (g) { total += w[g]; });
+    const chance = dropChance_(cfg, k);
+    const g = {};
+    GRADES.forEach(function (x) { g[x] = Math.round(chance * w[x] / total * 10) / 10; });
+    rows.push({ score: cfg.GAME_DROP_START + cfg.GAME_DROP_STEP * k, chance: chance, grades: g });
+  }
+  const limit = cfg.GAME_DROP_DAILY_LIMIT;
+  return {
+    start: cfg.GAME_DROP_START, step: cfg.GAME_DROP_STEP, table: rows, limit: limit,
+    remainingToday: name && limit > 0 ? Math.max(0, limit - gameDropsToday_(name)) : null,
+    rewards: gameRewards_(),
+  };
+}
+
+let gameRewardsCache_ = null;
+function gameRewards_() {
+  if (gameRewardsCache_) return gameRewardsCache_;
+  let rows = rows_('GAME_REWARDS').filter(function (r) { return String(r[1]).trim() !== ''; });
+  if (!rows.length) rows = DEFAULT_GAME_REWARDS;
+  gameRewardsCache_ = rows.map(function (r) {
+    const g = String(r[0]).trim();
+    return { grade: GRADES.indexOf(g) >= 0 ? g : '노멀', name: String(r[1]).trim(), desc: String(r[2] || '') };
+  });
+  return gameRewardsCache_;
+}
+
 /* ───────────────────────── 관리자 ───────────────────────── */
 
 function adminLogin(auth) {
@@ -242,11 +372,35 @@ function adminReview(auth, date, name, decision) {
 
 /** 관리자가 원하는 날짜에 합격(승인) 도장을 직접 찍어줌. 기록이 없어도 가능, 수치는 선택 */
 function adminGrantStamp(auth, name, date, value, memo) {
+  return adminGrantStampRange(auth, name, date, date, value, memo, false);
+}
+
+/**
+ * 기간 일괄 합격 도장. from~to (포함) 각 날짜에 승인 도장을 찍음.
+ * - 기록 없음 → 새로 생성 / 대기·비승인 → 승인으로 변경
+ * - 이미 승인된 날은 기간 부여일 때 건너뜀 (하루 부여일 때는 수치·메모 갱신)
+ * - skipWeekend: 토·일 제외 / 오늘 이후 날짜는 자동 제외 / 최대 93일
+ */
+function adminGrantStampRange(auth, name, from, to, value, memo, skipWeekend) {
   const admin = verifyAdmin_(auth);
   name = cleanName_(name);
-  date = String(date || '');
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('날짜를 선택하세요.');
-  if (date > today_()) throw new Error('미래 날짜에는 도장을 줄 수 없어요.');
+  from = String(from || ''); to = String(to || from);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) throw new Error('날짜를 선택하세요.');
+  if (from > to) { const t = from; from = to; to = t; }
+  const today = today_();
+  if (from > today) throw new Error('미래 날짜에는 도장을 줄 수 없어요.');
+  let future = 0;
+  const dates = [];
+  for (let d = from; d <= to; d = addDays_(d, 1)) {
+    if (d > today) { future++; continue; }
+    if (skipWeekend && isWeekend_(d)) continue;
+    dates.push(d);
+    if (dates.length > 93) throw new Error('한 번에 최대 93일까지 부여할 수 있어요.');
+  }
+  const total = (function () { let n = 0; for (let d = from; d <= to; d = addDays_(d, 1)) n++; return n; })();
+  const weekend = total - future - dates.length;
+  if (!dates.length) throw new Error('부여할 날짜가 없어요. (주말 제외/미래 날짜 확인)');
+
   const known = rows_('USERS').some(function (r) { return String(r[0]).trim() === name; });
   if (!known) throw new Error('등록되지 않은 사용자예요. (한 번 이상 로그인한 사용자만 가능)');
   const hasValue = value !== null && value !== undefined && String(value).trim() !== '';
@@ -254,24 +408,47 @@ function adminGrantStamp(auth, name, date, value, memo) {
   if (hasValue && (!isFinite(v) || v < 0 || v > 100000)) throw new Error('수치는 0 ~ 100000 사이로 입력하세요.');
   const cfg = config_();
   const note = '관리자부여' + (String(memo || '').trim() ? ': ' + String(memo).trim().slice(0, 100) : '');
-  let existed = false;
+  const single = from === to;
+  const autoOf = function (val) { return val === '' ? '관리자부여' : (Number(val) >= cfg.PASS_THRESHOLD ? '통과' : '미통과'); };
+  const res = { created: 0, updated: 0, already: 0, weekend: weekend, future: future, days: dates.length };
+
   withLock_(function () {
     const sh = sheet_('RECORDS');
     const data = rows_('RECORDS');
-    const idx = data.findIndex(function (r) { return date_(r[0]) === date && String(r[1]).trim() === name; });
+    const index = {};
+    data.forEach(function (r, i) { if (String(r[1]).trim() === name) index[date_(r[0])] = i; });
     const now = nowStr_();
-    if (idx >= 0) {
-      existed = true;
-      const row = data[idx];
+    const newRows = [];
+    dates.forEach(function (d) {
+      const i = index[d];
+      if (i === undefined) {
+        newRows.push([d, name, v, autoOf(v), STATUS.APPROVED, admin, now, now, note]);
+        res.created++;
+        return;
+      }
+      const row = data[i];
+      if (String(row[4]).trim() === STATUS.APPROVED && !single) { res.already++; return; }
       const nv = hasValue ? v : row[2];
-      const auto = nv === '' ? '관리자부여' : (Number(nv) >= cfg.PASS_THRESHOLD ? '통과' : '미통과');
-      sh.getRange(idx + 2, 3, 1, 7).setValues([[nv, auto, STATUS.APPROVED, admin, now, row[7], note]]);
-    } else {
-      const auto = v === '' ? '관리자부여' : (v >= cfg.PASS_THRESHOLD ? '통과' : '미통과');
-      sh.appendRow([date, name, v, auto, STATUS.APPROVED, admin, now, now, note]);
-    }
+      sh.getRange(i + 2, 3, 1, 7).setValues([[nv, autoOf(nv), STATUS.APPROVED, admin, now, row[7], note]]);
+      res.updated++;
+    });
+    if (newRows.length) sh.getRange(sh.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
   });
-  return { ok: true, existed: existed, wallet: wallet_(name, date.slice(0, 7)) };
+  res.ok = true;
+  res.existed = res.updated > 0;
+  res.wallet = wallet_(name, to > today ? today.slice(0, 7) : to.slice(0, 7));
+  return res;
+}
+
+function addDays_(ymd, n) {
+  const p = ymd.split('-').map(Number);
+  const d = new Date(Date.UTC(p[0], p[1] - 1, p[2] + n));
+  return d.getUTCFullYear() + '-' + ('0' + (d.getUTCMonth() + 1)).slice(-2) + '-' + ('0' + d.getUTCDate()).slice(-2);
+}
+function isWeekend_(ymd) {
+  const p = ymd.split('-').map(Number);
+  const w = new Date(Date.UTC(p[0], p[1] - 1, p[2])).getUTCDay();
+  return w === 0 || w === 6;
 }
 
 function adminListUsers(auth) {
@@ -363,11 +540,15 @@ function userCoupons_(name) {
 }
 
 function couponObj_(r) {
-  const rw = rewards_().filter(function (x) { return x.id === String(r[3]); })[0] || {};
+  const isGame = String(r[3]) === 'GAME';
+  let rw;
+  if (isGame) rw = gameRewards_().filter(function (x) { return x.name === String(r[4]); })[0] || {};
+  else rw = rewards_().filter(function (x) { return x.id === String(r[3]); })[0] || {};
   return {
     code: String(r[0]), name: String(r[1]), issuedAt: dateTime_(r[2]), rewardId: String(r[3]), rewardName: String(r[4]),
-    desc: rw.desc || '', icon: rw.icon || 'ticket', ym: month_(r[5]), cost: Number(r[6]) || 0,
+    desc: rw.desc || '', icon: isGame ? 'gift' : (rw.icon || 'ticket'), ym: isGame ? '' : month_(r[5]), cost: Number(r[6]) || 0,
     used: String(r[7]).trim() === '사용', usedAt: dateTime_(r[8]),
+    game: isGame, grade: isGame ? String(r[9] || '노멀') : '',
   };
 }
 
@@ -414,6 +595,14 @@ function ss_() {
 
 function ensureSheets_() {
   Object.keys(SHEETS).forEach(function (k) { sheet_(k); });
+  // 새 버전에서 추가된 설정 키를 기존 Config 시트에 채워 넣기
+  const have = {};
+  rows_('CONFIG').forEach(function (r) { have[String(r[0]).trim()] = true; });
+  const missing = DEFAULT_CONFIG.filter(function (r) { return !have[r[0]]; });
+  if (missing.length) {
+    const sh = sheet_('CONFIG');
+    sh.getRange(sh.getLastRow() + 1, 1, missing.length, 3).setValues(missing);
+  }
 }
 
 const sheetCache_ = {};
@@ -434,6 +623,7 @@ function sheet_(key) {
     }
     if (key === 'CONFIG') sh.getRange(2, 1, DEFAULT_CONFIG.length, 3).setValues(DEFAULT_CONFIG);
     if (key === 'COUPONS') sh.getRange('F:F').setNumberFormat('@');
+    if (key === 'GAME_REWARDS') sh.getRange(2, 1, DEFAULT_GAME_REWARDS.length, 3).setValues(DEFAULT_GAME_REWARDS);
     if (key === 'REWARDS') {
       sh.getRange('D:D').setNumberFormat('@');
       sh.getRange(2, 1, DEFAULT_REWARDS.length, 5).setValues(DEFAULT_REWARDS.map(function (r) { return r.map(String); }));
@@ -462,6 +652,12 @@ function config_() {
   });
   o.PASS_THRESHOLD = Number(o.PASS_THRESHOLD) || 300;
   o.EXCHANGE_GRACE_DAYS = Math.max(0, Math.floor(Number(o.EXCHANGE_GRACE_DAYS) || 0));
+  ['GAME_DROP_START', 'GAME_DROP_STEP', 'GAME_DROP_BASE', 'GAME_DROP_INC', 'GAME_DROP_MAX', 'GAME_DROP_DAILY_LIMIT'].forEach(function (k) {
+    const def = DEFAULT_CONFIG.filter(function (r) { return r[0] === k; })[0][1];
+    const n = Number(o[k]);
+    o[k] = isFinite(n) && String(o[k]).trim() !== '' ? n : def;
+  });
+  o.GAME_DROP_STEP = Math.max(1, o.GAME_DROP_STEP);
   o.APP_TITLE = String(o.APP_TITLE || '도트 운동 도장판');
   return o;
 }

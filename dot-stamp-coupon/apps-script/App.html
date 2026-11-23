@@ -38,8 +38,19 @@
   function show(id) {
     document.querySelectorAll('.screen').forEach(function (s) { s.classList.toggle('active', s.id === id); });
   }
-  function openModal(html) { $('modal-box').innerHTML = html; $('modal').classList.remove('hidden'); Sprites.hydrate($('modal-box')); }
-  function closeModal() { $('modal').classList.add('hidden'); }
+  var modalOnClose = null;
+  function openModal(html, opts) {
+    opts = opts || {};
+    if (modalOnClose) { var f = modalOnClose; modalOnClose = null; f(); }
+    $('modal-box').className = 'px-box modal-box ' + (opts.cls || '');
+    $('modal').className = 'modal ' + (opts.cls ? opts.cls + '-wrap' : '');
+    $('modal-box').innerHTML = html; Sprites.hydrate($('modal-box'));
+    modalOnClose = opts.onClose || null;
+  }
+  function closeModal() {
+    $('modal').classList.add('hidden');
+    if (modalOnClose) { var f = modalOnClose; modalOnClose = null; f(); }
+  }
 
   function stampHTML(status) {
     if (status === '승인') return Sprites.get('stamp-pass');
@@ -287,14 +298,18 @@
   }
 
   function couponHTML(c, admin) {
-    return '<div class="coupon ' + (c.used ? 'used' : '') + '">' +
+    var gk = GRADE_KEY[c.grade] || 'normal';
+    return '<div class="coupon ' + (c.used ? 'used' : '') + (c.game ? ' game g-' + gk : '') + '">' +
       '<div class="c-ico">' + Sprites.get(c.icon || 'ticket') + '</div>' +
-      '<div class="c-body"><div class="c-code">' + esc(c.rewardName) + '</div>' +
-      '<div class="c-meta">' + (admin === true ? '<b>' + esc(c.name) + '</b> · ' : '') + esc(c.desc) + '</div>' +
-      '<div class="c-meta">코드 <b>' + esc(c.code) + '</b></div>' +
-      '<div class="c-meta">' + (c.ym ? (+c.ym.slice(5)) + '월 도장 · ' : '') + '발급 ' + esc(c.issuedAt) + (c.used ? ' · 사용 ' + esc(c.usedAt) : '') + '</div></div>' +
-      (admin === true ? '<button class="btn btn-s ' + (c.used ? 'btn-dark' : 'btn-red') + '" data-action="use-coupon" data-code="' + esc(c.code) + '">' + (c.used ? '되돌리기' : '사용처리') + '</button>' : '') +
-      '<span class="c-tag">' + (c.used ? '사용완료' : '사용가능') + '</span></div>';
+      '<div class="c-body">' +
+        '<div class="c-top">' + (c.game ? '<span class="gb gb-' + gk + '">' + esc(c.grade) + '</span>' : '') +
+          '<span class="c-tag">' + (c.used ? '사용완료' : '사용가능') + '</span></div>' +
+        '<div class="c-code">' + esc(c.rewardName) + '</div>' +
+        '<div class="c-meta">' + (admin === true ? '<b>' + esc(c.name) + '</b> · ' : '') + esc(c.desc) + '</div>' +
+        '<div class="c-meta">코드 <b>' + esc(c.code) + '</b></div>' +
+        '<div class="c-meta">' + (c.game ? '🎮 미니게임 보상 · ' : c.ym ? (+c.ym.slice(5)) + '월 도장 · ' : '') + '발급 ' + esc(c.issuedAt) + (c.used ? ' · 사용 ' + esc(c.usedAt) : '') + '</div>' +
+        (admin === true ? '<button class="btn btn-s c-btn ' + (c.used ? 'btn-dark' : 'btn-red') + '" data-action="use-coupon" data-code="' + esc(c.code) + '">' + (c.used ? '되돌리기' : '사용처리') + '</button>' : '') +
+      '</div></div>';
   }
 
   function userPane(id) {
@@ -302,8 +317,10 @@
     document.querySelectorAll('.nav-btn').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-pane') === id); });
     if (id === 'pane-game') {
       if (!S.gameReady) {
+        S.gameReady = true;
         FruitGame.init({
-          onScore: function (s) { $('g-score').textContent = s; },
+          onScore: onGameScore,
+          onReset: onGameReset,
           onOver: function (score, maxLv) {
             $('g-saved').textContent = '기록 저장 중...';
             quiet('saveGameScore', S.name, score, maxLv).then(function (r) {
@@ -313,11 +330,128 @@
             }).catch(function () { $('g-saved').textContent = '저장 실패 (네트워크 확인)'; });
           },
         });
-        S.gameReady = true;
         quiet('getGameRanking', S.name).then(function (r) { $('g-best').textContent = r.myBest; });
       }
       FruitGame.start();
+      processDrops();
     } else if (S.gameReady) FruitGame.stop();
+  }
+
+  /* ── 미니게임 점수 보상 ── */
+  var G = { sid: null, info: null, start: 2500, step: 500, next: 2500, queue: [], rolling: false, limitedShown: false };
+
+  function onGameReset() {
+    G.sid = null; G.queue = []; G.rolling = false; G.limitedShown = false;
+    var gen = (G.gen = (G.gen || 0) + 1);
+    // 세션을 먼저 받은 뒤 안내 팝업 (팝업이 열려 있는 동안 게임은 자동 정지)
+    $('modal-box').className = 'px-box modal-box'; openModal('<p class="center">두근두근... <span class="dots">...</span></p>');
+    quiet('startGameSession', S.name).then(function (r) {
+      if (gen !== G.gen) return;
+      G.sid = r.sessionId; G.info = r.info; G.start = r.info.start; G.step = r.info.step; G.next = G.start;
+      updateGiftBar(FruitGame.getScore());
+      showGameIntro();
+    }).catch(function () { if (gen === G.gen) { G.next = G.start; updateGiftBar(0); showGameIntro(); } });
+  }
+
+  var INTROS = [
+    ['📜', '낡은 쪽지가 떨어져 있다...', '「{S}점... 그 너머에서 무언가가 떨어진다는 소문이 있다.<br>점수가 오를수록... 더 귀한 것이...」'],
+    ['🔮', '수정구슬이 희미하게 빛난다...', '「{S}점을 넘어서는 자에게<br>특별한 선물이 내려지리라...」'],
+    ['🐱', '길고양이가 다가와 속삭였다...', '「야옹... {S}점... 넘으면...<br>좋은 거... 나올지도... 냥...」'],
+    ['📻', '지지직... 수상한 무전이 들려온다...', '「...여기는 본부... {S}점 돌파 시...<br>보급품 투하 가능성 있음... 이상...」'],
+  ];
+  function showGameIntro() {
+    var t = INTROS[Math.floor(Math.random() * INTROS.length)];
+    var st = G.start.toLocaleString();
+    openModal(
+      '<div class="intro"><div class="intro-ico"><span data-sprite="gift"></span><b class="q blink">?</b></div>' +
+      '<p class="intro-a">' + t[0] + ' ' + t[1] + '</p>' +
+      '<p class="intro-b">' + t[2].replace('{S}', st) + '</p>' +
+      '<p class="hint center">※ 반드시 나오는 건 아니에요. 운이 좋다면...?</p></div>' +
+      '<div class="actions"><button class="btn btn-dark" data-action="game-info">?</button>' +
+      '<button class="btn btn-green" data-action="close">도전한다!</button></div>',
+      { cls: 'intro-box' });
+  }
+
+  function updateGiftBar(score) {
+    var el = $('g-gifttxt');
+    if (score < G.start) el.innerHTML = '<b>' + G.start.toLocaleString() + '</b>점을 넘으면...?';
+    else el.innerHTML = '다음 두근두근 <b>' + G.next.toLocaleString() + '</b>점';
+    $('g-giftbar').classList.toggle('hot', score >= G.start);
+  }
+
+  function onGameScore(score) {
+    $('g-score').textContent = score;
+    if (G.sid) {
+      while (score >= G.next) { G.queue.push(G.next); G.next += G.step; }
+      processDrops();
+    }
+    updateGiftBar(score);
+  }
+
+  function processDrops() {
+    if (G.rolling || !G.queue.length || !G.sid) return;
+    if (!$('pane-game').classList.contains('active') || !$('scr-user').classList.contains('active')) return; // 게임 화면으로 돌아오면 이어서 추첨
+    G.rolling = true;
+    var th = G.queue.shift();
+    quiet('rollGameDrop', S.name, G.sid, th, FruitGame.getScore()).then(function (r) {
+      G.rolling = false;
+      if (r.dropped) { showDrop(r); return; }
+      if (r.limited) { if (!G.limitedShown) toast('🎁 오늘 받을 수 있는 선물(' + r.limit + '개)을 모두 받았어요. 내일 또 만나요!'); G.limitedShown = true; }
+      else if (!r.duplicate) toast(pick(['✨ ' + th.toLocaleString() + '점 돌파! ...아무 일도 일어나지 않았다.', '✨ ' + th.toLocaleString() + '점! 무언가 스쳐 지나갔다... 다음엔...?', '✨ ' + th.toLocaleString() + '점! 바람 소리만 들린다...']));
+      processDrops();
+    }).catch(function () { G.rolling = false; processDrops(); });
+  }
+  function pick(a) { return a[Math.floor(Math.random() * a.length)]; }
+
+  var GRADE_KEY = { '노멀': 'normal', '레어': 'rare', '에픽': 'epic', '레전드': 'legend' };
+  var GRADE_EN = { '노멀': 'NORMAL', '레어': 'RARE!', '에픽': 'EPIC!!', '레전드': 'LEGEND!!!' };
+
+  function showDrop(r) {
+    var key = GRADE_KEY[r.grade] || 'normal', parts = '';
+    for (var i = 0; i < 28; i++) {
+      var ang = (i / 28) * Math.PI * 2, dist = 70 + Math.random() * 80;
+      parts += '<i style="--dx:' + Math.round(Math.cos(ang) * dist) + 'px;--dy:' + Math.round(Math.sin(ang) * dist) + 'px;--d:' + (Math.random() * .25).toFixed(2) + 's"></i>';
+    }
+    openModal(
+      '<div class="fx fx-' + key + '">' +
+        '<div class="fx-rays"></div><div class="fx-parts">' + parts + '</div>' +
+        '<div class="fx-phase1"><div class="fx-gift"><span data-sprite="gift"></span></div><p class="blink">두근두근...</p></div>' +
+        '<div class="fx-phase2">' +
+          '<p class="fx-score">' + r.threshold.toLocaleString() + '점 돌파 보상!</p>' +
+          '<div class="fx-grade">' + GRADE_EN[r.grade] + '</div>' +
+          '<div class="fx-card"><span class="gb gb-' + key + '">' + esc(r.grade) + '</span>' +
+            '<div class="fx-name">' + esc(r.rewardName) + '</div><div class="fx-desc">' + esc(r.desc) + '</div>' +
+            '<div class="fx-code">' + esc(r.code) + '</div></div>' +
+          '<p class="hint center">쿠폰함에 저장됐어요!' + (r.remainingToday != null ? ' (오늘 남은 선물 ' + Math.max(0, r.remainingToday) + '개)' : '') + '</p>' +
+          '<div class="actions"><button class="btn btn-dark" data-action="goto-coupon">쿠폰함</button><button class="btn btn-green" data-action="close">계속하기</button></div>' +
+        '</div>' +
+      '</div>',
+      { cls: 'fx-box', onClose: function () { refreshCoupons(); processDrops(); } });
+    setTimeout(function () { var f = document.querySelector('#modal-box .fx'); if (f) f.classList.add('open'); }, 1100);
+  }
+
+  function refreshCoupons() {
+    quiet('getUserMonth', S.name, S.ym).then(applyMonth).catch(function () {});
+  }
+
+  function showGameInfo() {
+    var go = function (info) {
+      var rows = info.table.map(function (t) {
+        return '<tr><td>' + t.score.toLocaleString() + '+</td><td><b>' + t.chance + '%</b></td>' +
+          ['노멀', '레어', '에픽', '레전드'].map(function (g) { return '<td>' + t.grades[g] + '</td>'; }).join('') + '</tr>';
+      }).join('');
+      var byGrade = ['노멀', '레어', '에픽', '레전드'].map(function (g) {
+        return '<div class="ri"><span class="gb gb-' + GRADE_KEY[g] + '">' + g + '</span> ' +
+          info.rewards.filter(function (x) { return x.grade === g; }).map(function (x) { return esc(x.name); }).join(', ') + '</div>';
+      }).join('');
+      openModal('<h3>🎁 비밀 보상 정보</h3>' +
+        '<p class="hint">' + info.start.toLocaleString() + '점부터 ' + info.step.toLocaleString() + '점마다 한 번씩 추첨! 높을수록 확률과 등급이 올라가요.</p>' +
+        '<div class="tbl-wrap"><table class="tbl tbl-s"><tr><th>점수</th><th>당첨</th><th>노멀</th><th>레어</th><th>에픽</th><th>레전드</th></tr>' + rows + '</table></div>' +
+        byGrade +
+        (info.limit > 0 ? '<p class="hint">하루 최대 ' + info.limit + '개' + (info.remainingToday != null ? ' · 오늘 남은 선물 ' + info.remainingToday + '개' : '') + '</p>' : '') +
+        '<div class="actions"><button class="btn btn-green" data-action="close">닫기</button></div>');
+    };
+    if (G.info) go(G.info); else call('startGameSession', S.name).then(function (r) { G.info = r.info; go(r.info); });
   }
 
   function showRanking() {
@@ -338,7 +472,9 @@
     if (t === 'rec') adminSearch();
     if (t === 'grant') {
       if (!$('g-date').value) $('g-date').value = S.today;
-      $('g-date').max = S.today;
+      if (!$('g-date2').value) $('g-date2').value = S.today;
+      $('g-date').max = S.today; $('g-date2').max = S.today;
+      rangeInfo();
       quiet('adminListUsers', S.admin).then(function (list) {
         $('g-users').innerHTML = list.map(function (n) { return '<option value="' + esc(n) + '">'; }).join('');
       }).catch(function () {});
@@ -398,10 +534,12 @@
       else if (a === 'save') saveInput(el.getAttribute('data-date'));
       else if (a === 'quick') { var inp = $('m-val'); inp.value = Math.max(0, (Number(inp.value) || 0) + Number(el.getAttribute('data-n'))); judge(); }
       else if (a === 'game-restart') FruitGame.reset();
+      else if (a === 'game-info') showGameInfo();
+      else if (a === 'grant-go') { var pg = S.pendingGrant; closeModal(); if (pg) doGrantRange(pg.name, pg.r, pg.value, pg.memo); }
       else if (a === 'game-rank') showRanking();
       else if (a === 'admin-search') adminSearch();
       else if (a === 'review') review(el.getAttribute('data-date'), el.getAttribute('data-name'), el.getAttribute('data-d'));
-      else if (a === 'goto-coupon') { userPane('pane-coupon'); cpTab('have'); }
+      else if (a === 'goto-coupon') { userPane('pane-coupon'); cpTab('have'); closeModal(); }
       else if (a === 'wallet-month') { S.walletYm = el.getAttribute('data-ym'); renderCoupons(); }
       else if (a === 'exchange') askExchange(el.getAttribute('data-id'));
       else if (a === 'do-exchange') doExchange(el.getAttribute('data-id'));
@@ -416,19 +554,74 @@
     if (at) return adminTab(at.getAttribute('data-admin-tab'));
     if (e.target.id === 'modal') closeModal();
   });
+  var grantMode = 'day';
+  function setGrantMode(m) {
+    grantMode = m;
+    document.querySelectorAll('[data-grant-mode]').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-grant-mode') === m); });
+    $('g-range-box').classList.toggle('hidden', m !== 'range');
+    $('g-date-label').textContent = m === 'range' ? '시작일' : '날짜';
+    rangeInfo();
+  }
+  function rangeDates() {
+    var a = $('g-date').value, b = $('g-date2').value;
+    if (!a || !b) return null;
+    if (a > b) { var t = a; a = b; b = t; }
+    var out = [], skip = $('g-skipwk').checked, d = new Date(a + 'T00:00:00'), end = new Date(b + 'T00:00:00'), future = 0, wk = 0;
+    while (d <= end) {
+      var ds = d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+      if (ds > S.today) future++;
+      else if (skip && (d.getDay() === 0 || d.getDay() === 6)) wk++;
+      else out.push(ds);
+      d.setDate(d.getDate() + 1);
+    }
+    return { from: a, to: b, days: out.length, future: future, weekend: wk };
+  }
+  function rangeInfo() {
+    if (grantMode !== 'range') return;
+    var r = rangeDates();
+    $('g-range-info').innerHTML = r ? '총 <b>' + r.days + '일</b>에 도장' + (r.weekend ? ' · 주말 ' + r.weekend + '일 제외' : '') + (r.future ? ' · 미래 ' + r.future + '일 제외' : '') + (r.days > 93 ? ' <b style="color:var(--red)">(최대 93일)</b>' : '') : '시작일과 종료일을 고르세요.';
+  }
+  ['g-date', 'g-date2', 'g-skipwk'].forEach(function (id) { $(id).addEventListener('change', rangeInfo); $(id).addEventListener('input', rangeInfo); });
+  document.querySelectorAll('[data-grant-mode]').forEach(function (b) { b.onclick = function () { setGrantMode(b.getAttribute('data-grant-mode')); }; });
+
+  function grantDone(name, label, res) {
+    var w = res.wallet;
+    var detail = res.days > 1 || grantMode === 'range'
+      ? '새로 ' + res.created + '일 · 승인으로 변경 ' + res.updated + '일' + (res.already ? ' · 이미 승인 ' + res.already + '일' : '') + (res.weekend ? ' · 주말 제외 ' + res.weekend + '일' : '')
+      : (res.existed ? '기존 기록 승인' : '새 기록');
+    $('g-result').innerHTML = '<div class="rec px-box"><div class="r-st">' + Sprites.get('stamp-pass') + '</div>' +
+      '<div class="r-main"><div class="r-name">' + esc(name) + '</div><div class="r-date">' + label + ' 합격 도장</div>' +
+      '<div class="r-date">' + detail + '</div>' +
+      '<div class="r-date">' + (+w.ym.slice(5)) + '월 보유 도장 ' + w.balance + '개 · 출석 ' + w.approved + '/' + w.days + '일</div></div></div>';
+    $('g-value').value = ''; $('g-memo').value = '';
+    $('g-result').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    toast(name + ' · ' + label + ' 합격 도장 완료!');
+  }
+
+  function doGrantRange(name, r, value, memo) {
+    call('adminGrantStampRange', S.admin, name, r.from, r.to, value, memo, $('g-skipwk').checked).then(function (res) {
+      grantDone(name, fmtDate(r.from) + ' ~ ' + fmtDate(r.to), res);
+    });
+  }
+
   $('form-grant').onsubmit = function (e) {
     e.preventDefault();
     var name = $('g-user').value.trim(), date = $('g-date').value, value = $('g-value').value, memo = $('g-memo').value;
     if (!name) return toast('사용자를 입력하세요.');
     if (!date) return toast('날짜를 선택하세요.');
-    call('adminGrantStamp', S.admin, name, date, value, memo).then(function (res) {
-      var w = res.wallet;
-      $('g-result').innerHTML = '<div class="rec px-box"><div class="r-st">' + Sprites.get('stamp-pass') + '</div>' +
-        '<div class="r-main"><div class="r-name">' + esc(name) + '</div><div class="r-date">' + fmtDate(date) + ' 합격 도장 ' + (res.existed ? '(기존 기록 승인)' : '(새 기록)') + '</div>' +
-        '<div class="r-date">' + (+w.ym.slice(5)) + '월 보유 도장 ' + w.balance + '개 · 출석 ' + w.approved + '/' + w.days + '일</div></div></div>';
-      $('g-value').value = ''; $('g-memo').value = '';
-      toast(name + ' · ' + fmtDate(date) + ' 합격 도장 완료!');
-    });
+    if (grantMode === 'range') {
+      var r = rangeDates();
+      if (!r) return toast('종료일을 선택하세요.');
+      if (!r.days) return toast('부여할 날짜가 없어요.');
+      if (r.days > 93) return toast('한 번에 최대 93일까지 부여할 수 있어요.');
+      S.pendingGrant = { name: name, r: r, value: value, memo: memo };
+      return openModal('<h3>기간 일괄 도장</h3><div class="center"><div class="big-stamp" style="width:30%">' + Sprites.get('stamp-pass') + '</div>' +
+        '<p><b>' + esc(name) + '</b><br>' + fmtDate(r.from) + ' ~ ' + fmtDate(r.to) + '</p>' +
+        '<p>총 <b>' + r.days + '일</b>에 합격 도장을 찍을까요?</p>' +
+        '<p class="hint">' + (r.weekend ? '주말 ' + r.weekend + '일 제외 · ' : '') + '이미 승인된 날은 그대로 둬요.</p></div>' +
+        '<div class="actions"><button class="btn btn-dark" data-action="close">취소</button><button class="btn btn-green" data-action="grant-go">찍기</button></div>');
+    }
+    call('adminGrantStamp', S.admin, name, date, value, memo).then(function (res) { grantDone(name, fmtDate(date), res); });
   };
   $('f-status').onchange = adminSearch;
   $('f-date').onchange = adminSearch;

@@ -18,7 +18,7 @@ var FruitGame = (function () {
   var SCORE = [1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 66];
   var G = 0.045, SUB = 3, DAMP = 0.992, MAXV = 3.2;
 
-  var cvs, ctx, nextCvs, nctx, onOver, onScore;
+  var cvs, ctx, nextCvs, nctx, onOver, onScore, onReset, paused = false;
   var fruits, aimX, cur, next, cooldown, score, maxLv, dangerT, over, running, raf, last, idSeq;
   var sprites = [];
 
@@ -61,7 +61,7 @@ var FruitGame = (function () {
     cvs = document.getElementById('g-canvas'); ctx = cvs.getContext('2d');
     nextCvs = document.getElementById('g-next'); nctx = nextCvs.getContext('2d');
     ctx.imageSmoothingEnabled = false; nctx.imageSmoothingEnabled = false;
-    onOver = opts.onOver; onScore = opts.onScore;
+    onOver = opts.onOver; onScore = opts.onScore; onReset = opts.onReset;
     FRUITS.forEach(function (f, i) { sprites[i] = makeSprite(f, i); });
     var evo = document.getElementById('g-evo');
     evo.innerHTML = '';
@@ -73,11 +73,14 @@ var FruitGame = (function () {
       evo.appendChild(c);
     });
     function px(e) { var r = cvs.getBoundingClientRect(); return (e.clientX - r.left) / r.width * W; }
-    cvs.addEventListener('pointerdown', function (e) { if (over) return; aimX = px(e); cvs.setPointerCapture(e.pointerId); });
-    cvs.addEventListener('pointermove', function (e) { if (!over) aimX = px(e); });
-    cvs.addEventListener('pointerup', function (e) { if (!over) { aimX = px(e); drop(); } });
+    cvs.addEventListener('pointerdown', function (e) { if (over || blocked()) return; aimX = px(e); cvs.setPointerCapture(e.pointerId); });
+    cvs.addEventListener('pointermove', function (e) { if (!over && !blocked()) aimX = px(e); });
+    cvs.addEventListener('pointerup', function (e) { if (!over && !blocked()) { aimX = px(e); drop(); } });
     reset();
   }
+
+  // 팝업(모달)이 열려 있으면 게임 일시정지
+  function blocked() { var m = document.getElementById('modal'); return paused || (m && !m.classList.contains('hidden')); }
 
   function rnd() { return Math.floor(Math.random() * 5); }
   function reset() {
@@ -86,6 +89,7 @@ var FruitGame = (function () {
     onScore && onScore(score);
     drawNext();
     document.getElementById('g-over').classList.add('hidden');
+    onReset && onReset();
   }
 
   function drawNext() {
@@ -197,7 +201,7 @@ var FruitGame = (function () {
   function loop(t) {
     if (!running) return;
     var dt = Math.min(50, t - (last || t)); last = t;
-    if (!over) {
+    if (!over && !blocked()) {
       var n = Math.max(1, Math.round(dt / 16.67));
       for (var k = 0; k < n; k++) { step(); if (cooldown > 0) cooldown--; }
       checkOver(dt);
@@ -209,6 +213,9 @@ var FruitGame = (function () {
   function start() { if (running) return; running = true; last = 0; raf = requestAnimationFrame(loop); }
   function stop() { running = false; cancelAnimationFrame(raf); }
 
-  return { init: init, start: start, stop: stop, reset: reset, FRUITS: FRUITS };
+  function pause() { paused = true; }
+  function resume() { paused = false; last = 0; }
+  function getScore() { return score; }
+  return { init: init, start: start, stop: stop, reset: reset, pause: pause, resume: resume, getScore: getScore, FRUITS: FRUITS };
 })();
 </script>
